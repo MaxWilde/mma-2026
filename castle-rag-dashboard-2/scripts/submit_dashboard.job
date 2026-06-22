@@ -1,0 +1,13 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=dashboard
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=0:30:00
+
+cd /gpfs/home6/scur0275/multimedia-rag
+export PYTHONPATH="$PWD:$PWD/castle-rag-dashboard-2"
+/gpfs/scratch1/shared/group_h/data_goncalo/.venv/bin/python3 castle-rag-dashboard-2/app.py

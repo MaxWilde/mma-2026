@@ -1,0 +1,36 @@
+# large data
+*.mp4
+*.zip
+keyframes/
+all_transcripts/
+people_povs/
+kitchen_and_living/
+
+# generated artifacts
+artifacts/
+*.faiss
+*.jsonl
+
+# models / env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# slurm logs
+slurm/*.out
+slurm/*.err
+day1/
+artifacts/
+.venv/
+__pycache__/
+*.pyc
+*.faiss
+*.npy
+*.safetensors
+*.jsonl
+slurm/*.out
+slurm/*.err
+slurm-*.out
+gpu_test_*.out
+best[raw_score]:
