@@ -41,9 +41,11 @@ def build_evidence_viewer(
                     ),
                     html.A(
                         "▶ YouTube",
+                        id="youtube-evidence-link",
                         href=youtube_url,
                         target="_blank",
                         className="yt-link",
+                        n_clicks=0,
                     ) if youtube_url else None,
                 ],
             ),
@@ -69,6 +71,7 @@ def _visual_evidence_body(
         _grounding_bar(grounding) if grounding else None,
         # Collapsible transcript — hidden by default, no callback needed
         html.Details(
+            id="visual-transcript-details",
             className="transcript-details",
             children=[
                 html.Summary("Transcript", className="transcript-summary"),
@@ -129,9 +132,11 @@ def _image_area(result: RetrievalResult, grounding: dict[str, Any] | None) -> ht
         children.append(
             html.A(
                 "View original frame",
+                id="original-frame-link",
                 href=orig_src,
                 target="_blank",
                 className="orig-frame-link",
+                n_clicks=0,
             )
         )
 

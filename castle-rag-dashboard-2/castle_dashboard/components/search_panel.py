@@ -100,5 +100,37 @@ def build_search_panel() -> html.Aside:
                     ),
                 ],
             ),
+            html.Section(
+                id="evaluation-panel",
+                className="panel compact-panel evaluation-panel",
+                style={"display": "none"},
+                children=[
+                    html.Div(
+                        className="evaluation-heading",
+                        children=[
+                            html.H2("Expert evaluation"),
+                            html.Span("Optional logger", className="evaluation-badge"),
+                        ],
+                    ),
+                    html.Label("Task prompt", htmlFor="evaluation-task-prompt"),
+                    dcc.Textarea(
+                        id="evaluation-task-prompt",
+                        value="",
+                        placeholder="Paste one evaluation task prompt…",
+                        className="query-input evaluation-task-input",
+                    ),
+                    html.Button(
+                        "Start evaluation task",
+                        id="evaluation-toggle-button",
+                        n_clicks=0,
+                        className="evaluation-start-button",
+                    ),
+                    html.Div(
+                        "Evaluation mode is ready.",
+                        id="evaluation-status",
+                        className="evaluation-status",
+                    ),
+                ],
+            ),
         ],
     )

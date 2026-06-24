@@ -8,6 +8,6 @@
 #SBATCH --mem=32G
 #SBATCH --time=0:30:00
 
-cd /gpfs/home6/scur0275/multimedia-rag
+cd /gpfs/home6/scur0260/multimedia-rag
 export PYTHONPATH="$PWD:$PWD/castle-rag-dashboard-2"
 /gpfs/scratch1/shared/group_h/data_goncalo/.venv/bin/python3 castle-rag-dashboard-2/app.py
