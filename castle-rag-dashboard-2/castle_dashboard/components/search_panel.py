@@ -73,9 +73,13 @@ def build_search_panel() -> html.Aside:
                         type="dot",
                         children=html.Div(id="search-error", className="search-error"),
                     ),
-                    html.Div(
-                        id="keyword-suggestions",
-                        className="keyword-suggestions",
+                    dcc.Loading(
+                        type="dot",
+                        color="#2563eb",
+                        children=html.Div(
+                            id="keyword-suggestions",
+                            className="keyword-suggestions",
+                        ),
                     ),
                     html.Div(
                         className="refine-block",

@@ -13,8 +13,8 @@ ModelFunction = Callable[[str], str]
 def recommend_transcript_keywords(
     question: str,
     transcript_candidates: list[dict],
-    top_n: int = 10,
-    max_keywords: int = 10,
+    top_n: int = 20,
+    max_keywords: int = 20,
     *,
     model_function: ModelFunction | None = None,
 ) -> dict[str, Any]:
@@ -393,27 +393,32 @@ def fallback_keywords(
 ) -> dict[str, Any]:
     if vocabulary is not None:
         terms = []
-        for term in vocabulary["candidate_terms"][: max_keywords]:
+        candidate_terms = vocabulary["candidate_terms"][:max_keywords]
+        for i, term in enumerate(candidate_terms):
+            # Linearly decrease from 0.55 at rank 0 to 0.30 at the bottom;
+            # vocabulary is already sorted by quality so rank reflects relevance.
+            confidence = round(max(0.30, 0.55 - i * (0.25 / max(len(candidate_terms) - 1, 1))), 2)
             terms.append(
                 {
                     "term": term,
                     "type": "phrase" if " " in term else "keyword",
                     "source": "transcript",
                     "reason": "Fallback term from retrieved transcript candidate vocabulary.",
-                    "confidence": 0.45,
+                    "confidence": confidence,
                 }
             )
         remaining = max_keywords - len(terms)
-        for term in vocabulary["query_terms"][: max(0, remaining)]:
+        for i, term in enumerate(vocabulary["query_terms"][: max(0, remaining)]):
             if term in {item["term"] for item in terms}:
                 continue
+            confidence = round(max(0.20, 0.40 - i * 0.05), 2)
             terms.append(
                 {
                     "term": term,
                     "type": "phrase" if " " in term else "keyword",
                     "source": "query",
                     "reason": "Fallback term from user query vocabulary.",
-                    "confidence": 0.35,
+                    "confidence": confidence,
                 }
             )
         return {
@@ -487,6 +492,12 @@ def valid_term(term: str) -> bool:
     if re.search(r"(.)\1{5,}", term):
         return False
     tokens = tokenize(term)
+    # Single-character tokens are noise — 2-char abbreviations (vr, dj, ar, pc) are fine
+    if len(tokens) == 1 and len(tokens[0]) < 2:
+        return False
+    # Pure-number terms (years, counts) are rarely useful search keywords
+    if all(t.isdigit() for t in tokens):
+        return False
     content = [token for token in tokens if token not in STOPWORDS]
     if not content:
         return False

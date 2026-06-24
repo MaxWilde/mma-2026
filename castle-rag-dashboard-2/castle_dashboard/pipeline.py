@@ -208,8 +208,8 @@ def recommend_keywords(
     question: str,
     transcript_results: list[dict[str, Any]],
     *,
-    top_n: int = 10,
-    max_keywords: int = 10,
+    top_n: int = 20,
+    max_keywords: int = 20,
 ) -> dict[str, Any]:
     """Return dashboard-ready transcript steering suggestions.
 
@@ -242,12 +242,145 @@ def recommend_keywords(
         }
 
 
+@lru_cache(maxsize=1)
+def _load_minilm_model() -> Any:
+    """Load the same MiniLM model used by transcript dense retrieval, cached."""
+    from src.retriever import load_embedding_model, load_index  # type: ignore[import]
+    _, _, model_name = load_index(TRANSCRIPT_INDEX_DIR)
+    return load_embedding_model(model_name)
+
+
+def recommend_keywords_semantic(
+    question: str,
+    transcript_results: list[dict[str, Any]],
+    *,
+    top_n: int = 20,
+    max_keywords: int = 20,
+) -> dict[str, Any]:
+    """Rank candidate terms by MiniLM cosine similarity to the query.
+
+    Replaces the slow Qwen LLM path with a fast embedding-based approach:
+    build the candidate vocabulary from retrieved transcript text, encode
+    everything with the already-loaded MiniLM model, and rank by similarity.
+    Confidence scores are real cosine similarities, not LLM-generated numbers.
+    """
+    import numpy as np
+    from src.transcript_keyword_recommender import build_keyword_vocabulary  # type: ignore[import]
+
+    if not transcript_results:
+        return {"source": "unavailable_no_transcript_results", "suggested_terms": []}
+
+    candidates = transcript_results[:top_n]
+    vocabulary = build_keyword_vocabulary(question, candidates)
+    # Merge candidate and query terms; candidate terms first (higher priority)
+    seen: set[str] = set()
+    pool: list[tuple[str, str]] = []  # (term, source)
+    for t in vocabulary["candidate_terms"]:
+        if t not in seen:
+            seen.add(t)
+            pool.append((t, "transcript"))
+    for t in vocabulary["query_terms"]:
+        if t not in seen:
+            seen.add(t)
+            pool.append((t, "query"))
+
+    if not pool:
+        return {"source": "unavailable_no_vocabulary", "suggested_terms": []}
+
+    model = _load_minilm_model()
+    terms = [p[0] for p in pool]
+    texts = [question] + terms
+    embeddings = model.encode(
+        texts,
+        batch_size=128,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    embeddings = np.asarray(embeddings, dtype="float32")
+    query_emb = embeddings[0]
+    term_embs = embeddings[1:]
+    scores = (term_embs @ query_emb).tolist()
+
+    scored = sorted(zip(pool, scores), key=lambda x: x[1], reverse=True)
+    suggested_terms = [
+        {
+            "term": term,
+            "type": "phrase" if " " in term else "keyword",
+            "source": source,
+            "reason": f"MiniLM cosine similarity to query: {score:.3f}",
+            "confidence": float(max(0.0, min(1.0, score))),
+        }
+        for (term, source), score in scored[:max_keywords]
+    ]
+    return {
+        "source": "minilm_semantic_keywords",
+        "suggested_terms": suggested_terms,
+    }
+
+
+def recommend_visual_keywords(
+    question: str,
+    visual_results: list[dict[str, Any]],
+    *,
+    max_keywords: int = 20,
+) -> dict[str, Any]:
+    """Return keyword suggestions derived from visual captions for visual-mode searches.
+
+    Reuses the transcript keyword vocabulary + fallback machinery with caption
+    text standing in for transcript snippets, so the same quality filters apply.
+    """
+    caption_candidates = [
+        {
+            "transcript_snippet": item.get("visual_caption") or item.get("caption") or "",
+            "source_name": item.get("source_name", ""),
+            "score": item.get("score", 0.0),
+        }
+        for item in visual_results
+        if item.get("visual_caption") or item.get("caption")
+    ]
+    if not caption_candidates:
+        return {
+            "source": "unavailable_no_visual_captions",
+            "suggested_terms": [],
+            "keyword_recommender_debug": {"failure_reason": "no visual captions available"},
+        }
+    try:
+        from src.transcript_keyword_recommender import build_keyword_vocabulary, fallback_keywords  # type: ignore[import]
+        vocabulary = build_keyword_vocabulary(question, caption_candidates)
+        result = fallback_keywords(
+            question,
+            caption_candidates,
+            top_n=len(caption_candidates),
+            max_keywords=max_keywords,
+            vocabulary=vocabulary,
+        )
+        result["source"] = "visual_caption_keywords"
+        return result
+    except Exception as exc:
+        return {
+            "source": "visual_caption_keywords_error",
+            "suggested_terms": [],
+            "keyword_recommender_debug": {"failure_reason": f"{type(exc).__name__}: {exc}"},
+        }
+
+
 def add_transcript_heatmap(question: str, item: dict[str, Any]) -> dict[str, Any]:
     """On-demand transcript enrichment: extractive QA answer span + n-best
     candidates, and a token-level heatmap for highlighting. Mirrors
     scripts/query_evidence.py::add_transcript_heatmap."""
     from scripts.query_evidence import add_transcript_heatmap as _add_transcript_heatmap  # type: ignore[import]
     return _add_transcript_heatmap(question, item)
+
+
+def warmup_minilm() -> None:
+    """Pre-load the MiniLM model used for semantic keyword ranking."""
+    try:
+        t0 = time.perf_counter()
+        _load_minilm_model()
+        print(f"[pipeline] MiniLM keyword model pre-loaded in {time.perf_counter() - t0:.1f}s", flush=True)
+    except Exception as exc:
+        print(f"[pipeline] MiniLM warmup skipped: {exc}", flush=True)
 
 
 def warmup_grounding_dino() -> None:

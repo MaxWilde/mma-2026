@@ -55,7 +55,18 @@ def register_callbacks(app: Dash) -> None:
             message = f"Search failed: {type(exc).__name__}: {exc}"
             return [], None, {"liked": [], "disliked": []}, message
 
-    # ── 1a. Generate keyword chips after results render ──────────────────────
+    # ── 1a. Clear stale keyword chips the instant Search is clicked ──────────
+    # Fires immediately on button click (before run_search returns), so the
+    # old chips disappear rather than lingering through retrieval + Qwen latency.
+    @app.callback(
+        Output("keyword-suggestions", "children", allow_duplicate=True),
+        Input("search-button", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def clear_keyword_suggestions_on_search(_n_clicks):
+        return html.Div("Computing keywords…", className="keyword-empty")
+
+    # ── 1b. Generate keyword chips after results render ──────────────────────
     @app.callback(
         Output("keyword-suggestions", "children"),
         Input("filtered-result-ids", "data"),
@@ -75,7 +86,7 @@ def register_callbacks(app: Dash) -> None:
             traceback.print_exc()
             return html.Div("Keyword suggestions unavailable; see server log.", className="keyword-empty")
 
-    # ── 1b. Add a recommended keyword to the query box ───────────────────────
+    # ── 1c. Add a recommended keyword to the query box ───────────────────────
     @app.callback(
         Output("query-input", "value"),
         Input({"type": "keyword-chip", "term": ALL}, "n_clicks"),
@@ -83,6 +94,12 @@ def register_callbacks(app: Dash) -> None:
         prevent_initial_call=True,
     )
     def append_keyword_to_query(_clicks, current_query):
+        # Guard against spurious fires when chip components are created/re-created.
+        # Dash fires ALL-pattern callbacks on component creation even though n_clicks=0;
+        # the triggered list value tells us the actual click count on the firing component.
+        triggered = callback_context.triggered
+        if not triggered or not triggered[0].get("value"):
+            return no_update
         trigger = callback_context.triggered_id
         if not isinstance(trigger, dict) or trigger.get("type") != "keyword-chip":
             return no_update
@@ -226,9 +243,12 @@ def register_callbacks(app: Dash) -> None:
         refined_visual = _pl.retrieve_visual_from_embedding(refined_embedding, top_k=filters.top_k)
         results = dashboard_service.refine_visual(filters, refined_visual)
 
+        disliked_set = set(disliked_ids)
+        results = [r for r in results if r.id not in disliked_set]
+
         print(
             f"[feedback] Rocchio refine — liked={len(liked_rows)} disliked={len(disliked_rows)}"
-            f" → {len(results)} results"
+            f" → {len(results)} results (after hiding disliked)"
         )
         return [r.id for r in results], {"liked": [], "disliked": []}
 
@@ -363,7 +383,7 @@ def build_keyword_suggestions(payload: dict[str, Any] | None):
         return html.Div("No recommended keywords yet.", className="keyword-empty")
 
     chips = []
-    for index, item in enumerate(terms[:10], start=1):
+    for index, item in enumerate(terms[:20], start=1):
         term = str(item.get("term", "")).strip()
         if not term:
             continue

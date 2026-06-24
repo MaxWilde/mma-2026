@@ -44,7 +44,7 @@ def build_evidence_viewer(
                         href=youtube_url,
                         target="_blank",
                         className="yt-link",
-                    ) if youtube_url and not is_transcript else None,
+                    ) if youtube_url else None,
                 ],
             ),
             # Body differs by evidence type

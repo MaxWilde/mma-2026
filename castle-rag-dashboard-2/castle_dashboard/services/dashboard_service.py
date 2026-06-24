@@ -121,6 +121,7 @@ class DashboardService:
         self._last_router_debug: dict[str, Any] = {}
         self._last_query: str = ""
         self._last_transcript_results: list[dict[str, Any]] = []
+        self._last_visual_results: list[dict[str, Any]] = []
         self._last_keyword_suggestions: dict[str, Any] = {
             "source": "not_run",
             "suggested_terms": [],
@@ -143,6 +144,7 @@ class DashboardService:
         visual_results = _pipeline.retrieve_visual(filters.query, top_k=top_k)
         print(f"[dashboard] transcript retrieval started: {filters.query!r}", flush=True)
         transcript_results = _pipeline.retrieve_transcript(filters.query, top_k=top_k)
+        self._last_visual_results = visual_results
         self._last_transcript_results = transcript_results
         self._last_keyword_suggestions = {
             "source": "pending",
@@ -202,11 +204,11 @@ class DashboardService:
             return self._last_keyword_suggestions
 
         print("[dashboard] keyword recommendation started", flush=True)
-        self._last_keyword_suggestions = _pipeline.recommend_keywords(
+        self._last_keyword_suggestions = _pipeline.recommend_keywords_semantic(
             self._last_query,
             self._last_transcript_results,
             top_n=min(20, max(1, len(self._last_transcript_results))),
-            max_keywords=10,
+            max_keywords=20,
         )
         print("[dashboard] keyword recommendation finished", flush=True)
         return self._last_keyword_suggestions

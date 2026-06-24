@@ -19,8 +19,9 @@ if __name__ == "__main__":
     _pl.add_transcript_heatmap("warmup", {"text": "warmup", "evidence_type": "transcript"})
     print(f"[startup] Core models ready in {time.perf_counter() - t0:.1f}s — serving on :13209", flush=True)
 
-    # Pre-load GroundingDINO in the background so the first 'Localize' click
-    # is fast.  Runs in a daemon thread so it doesn't delay the HTTP server.
+    # Pre-load MiniLM (keyword ranking) and GroundingDINO in background daemon
+    # threads so neither delays the HTTP server before their first use.
+    threading.Thread(target=_pl.warmup_minilm, daemon=True, name="minilm-warmup").start()
     threading.Thread(target=_pl.warmup_grounding_dino, daemon=True, name="dino-warmup").start()
 
     app.run(debug=False, host="127.0.0.1", port=13209)

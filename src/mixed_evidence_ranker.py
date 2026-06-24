@@ -5,10 +5,6 @@ import re
 from typing import Any
 
 
-QUALITY_WEIGHT = 0.75
-PRIOR_WEIGHT = 0.25
-
-
 def build_mixed_evidence_list(
     question: str,
     visual_results: list[dict],
@@ -52,8 +48,6 @@ def build_mixed_evidence_list(
     mixed = mixed[:top_k]
     for rank, item in enumerate(mixed, start=1):
         final_score = float(item["score_components"]["final_score"])
-        # Use the raw final_score as confidence instead of normalizing by the
-        # top result, which would always make the top result show 100%.
         confidence = min(final_score, 1.0)
         item["rank"] = rank
         item["confidence"] = confidence
@@ -102,9 +96,11 @@ def score_candidates(
     for item, quality in zip(candidates, quality_scores):
         calibrated_quality_score = float(quality["calibrated_quality_score"] or 0.0)
         diversity_penalty = float(item.get("_diversity_penalty", 0.0))
-        quality_component = QUALITY_WEIGHT * calibrated_quality_score
-        prior_component = PRIOR_WEIGHT * channel_weight
-        final_score = (quality_component + prior_component) * max(0.0, 1.0 - diversity_penalty)
+        # Multiplicative: quality × channel_weight means a weak match in a
+        # confident channel and a strong match in a low-confidence channel both
+        # produce an honest lower score, instead of an additive floor keeping
+        # everything artificially high.
+        final_score = calibrated_quality_score * channel_weight * max(0.0, 1.0 - diversity_penalty)
         updated = dict(item)
         updated["evidence_type"] = evidence_type
         updated["confidence"] = 0.0
@@ -116,11 +112,9 @@ def score_candidates(
             "normalized_score": quality.get("normalized_score"),
             "percentile_rank": quality.get("percentile_rank"),
             "router_channel_weight": channel_weight,
-            "quality_component": quality_component,
-            "prior_component": prior_component,
             "diversity_penalty": diversity_penalty,
             "final_score": final_score,
-            "confidence_note": "Relative display confidence within the mixed top-k list, not calibrated probability.",
+            "confidence_note": "quality × router channel weight; not a calibrated probability.",
         }
         updated.pop("_diversity_penalty", None)
         scored.append(updated)
