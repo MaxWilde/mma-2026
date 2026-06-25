@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time as _time
 from pathlib import Path
+
+_t0_module = _time.perf_counter()
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: module start (sys.path setup)", flush=True)
 
 # Ensure the live backend repo (src.*, scripts.*) is importable, taking
 # priority over multimedia-rag/, which only holds a stale, pre-backend-update
@@ -19,24 +23,38 @@ for _root in (_MMA_ROOT, _BACKEND_ROOT):  # inserted in reverse priority order
         sys.path.remove(_root_str)
     sys.path.insert(0, _root_str)
 
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: importing dash …", flush=True)
 from dash import Dash
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: importing dotenv …", flush=True)
 from dotenv import load_dotenv
-
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: importing callbacks …", flush=True)
 from castle_dashboard.callbacks.dashboard_callbacks import register_callbacks
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: importing layout …", flush=True)
 from castle_dashboard.components.layout import build_layout
+print(f"[t_mod={_time.perf_counter()-_t0_module:.2f}s] castle_dashboard.app: all imports done", flush=True)
 
 
-def create_app() -> Dash:
+def create_app(t_script_start: float = 0.0) -> Dash:
+    def _log(msg: str) -> None:
+        elapsed = _time.perf_counter() - t_script_start if t_script_start else _time.perf_counter() - _t0_module
+        print(f"[t={elapsed:.2f}s] create_app: {msg}", flush=True)
+
+    _log("load_dotenv …")
     load_dotenv()
+    _log("Dash() init …")
     app = Dash(
         __name__,
         title="CASTLE RAG Dashboard",
         suppress_callback_exceptions=True,
         assets_folder=str(_DASHBOARD_ROOT / "assets"),
     )
+    _log("build_layout() …")
     app.layout = build_layout()
+    _log("register_callbacks() …")
     register_callbacks(app)
+    _log("_register_image_routes() …")
     _register_image_routes(app)
+    _log("done")
     return app
 
 

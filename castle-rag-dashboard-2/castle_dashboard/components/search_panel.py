@@ -1,3 +1,5 @@
+import time as _time
+
 from dash import dcc, html
 
 from castle_dashboard.services.dashboard_service import dashboard_service
@@ -9,9 +11,14 @@ MODALITY_OPTIONS = [
 
 
 def build_search_panel() -> html.Aside:
+    _t = _time.perf_counter()
+    print("[search_panel] build_search_panel: calling get_available_viewpoints …", flush=True)
+    _vp = dashboard_service.get_available_viewpoints()
+    print(f"[search_panel] build_search_panel: get_available_viewpoints returned in {_time.perf_counter()-_t:.2f}s", flush=True)
     viewpoints = [{"label": "All viewpoints", "value": "All"}] + [
-        {"label": v, "value": v} for v in dashboard_service.get_available_viewpoints()
+        {"label": v, "value": v} for v in _vp
     ]
+    print(f"[search_panel] build_search_panel: layout built in {_time.perf_counter()-_t:.2f}s ({len(viewpoints)-1} viewpoints)", flush=True)
     return html.Aside(
         className="sidebar",
         children=[

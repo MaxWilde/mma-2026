@@ -1,0 +1,10 @@
+[node] tcn148.local.snellius.surf.nl
+[warm] parallel prewarm of whole site-packages + models …
+[warm] done in 4s
+[imports AFTER prewarm]
+  import torch: 2.5s
+  import transformers: 6.8s
+  import sentence_transformers: 4.0s
+  import scipy.linalg: 0.0s
+  import sklearn.metrics: 0.0s
+[done]

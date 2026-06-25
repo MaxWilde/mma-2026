@@ -8,6 +8,69 @@
 #SBATCH --mem=32G
 #SBATCH --time=0:30:00
 
+# The venv's python3 is a deep symlink to the system Python under /sw/arch/,
+# so CPython's venv detection looks for pyvenv.cfg in the wrong place and
+# misses the installed packages. Fix: use the original Python binary (which
+# has a working pyvenv.cfg) but prepend the home copy of site-packages to
+# PYTHONPATH so packages are read from ~ (home GPFS) instead of scratch.
+VENV_ORIG="/gpfs/scratch1/shared/group_h/data_goncalo/.venv"
+VENV_HOME="${HOME}/.castle-venv"
+
+if [ ! -d "${VENV_HOME}/lib" ]; then
+    echo "ERROR: home venv not found at ${VENV_HOME}"
+    echo "Run: cp -r ${VENV_ORIG} ${VENV_HOME}"
+    exit 1
+fi
+
+# Detect Python version from the original venv (e.g. "3.11")
+PY_VER=$("${VENV_ORIG}/bin/python3" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+export PYTHONPATH="${VENV_HOME}/lib/python${PY_VER}/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+
+PYTHON="${VENV_ORIG}/bin/python3"
+
+# ── Launch dashboard ───────────────────────────────────────────────────────────
 cd /gpfs/home6/scur0275/multimedia-rag
-export PYTHONPATH="$PWD:$PWD/castle-rag-dashboard-2"
-/gpfs/scratch1/shared/group_h/data_goncalo/.venv/bin/python3 castle-rag-dashboard-2/app.py
+export PYTHONPATH="$PWD:$PWD/castle-rag-dashboard-2:${PYTHONPATH}"
+
+# Compute nodes have no internet. Force HuggingFace fully offline so model/
+# processor loads never attempt a hub lookup (those hang for ~5 min on
+# connection timeouts before falling back to the local files). All weights
+# are already local under castle-rag-dashboard-2/models/.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# Guard: the home venv MUST be complete. If a package is missing here, Python
+# silently falls back to the original venv on shared scratch, and loading that
+# package's compiled extension cold from contended scratch can stall for
+# minutes (this is exactly what made SigLIP load take ~5 min — transformers
+# lazily imports scipy, which was missing from the home copy).
+SITE="${VENV_HOME}/lib/python${PY_VER}/site-packages"
+for pkg in torch transformers scipy sklearn; do
+    if [ ! -e "${SITE}/${pkg}" ]; then
+        echo "ERROR: home venv is incomplete — '${pkg}' missing from ${SITE}"
+        echo "Recopy it: cp -a ${VENV_ORIG}/lib/python${PY_VER}/site-packages/${pkg}* ${SITE}/"
+        exit 1
+    fi
+done
+
+# Warm the page cache for the heavy imports + models before launching. On a
+# fresh node these are cold, and Python imports (torch/transformers/
+# sentence_transformers) do thousands of tiny random reads — the dominant
+# startup cost on GPFS. Reading them once in parallel pays that cost up front at
+# full aggregate bandwidth, so every subsequent import hits RAM. (A missing
+# package here just means it imports cold — never breaks — so the list need not
+# be exhaustive, only cover the big ones.)
+echo "[setup] warming page cache (heavy pkgs + models) …"
+_t=$(date +%s)
+{ for pkg in torch torch.libs transformers tokenizers safetensors huggingface_hub \
+             sentence_transformers torchvision torchvision.libs scipy scipy.libs \
+             sklearn sklearn.libs scikit_learn.libs numpy numpy.libs PIL pillow.libs \
+             regex faiss; do
+      [ -e "${SITE}/${pkg}" ] && find "${SITE}/${pkg}" -type f -print0
+  done 2>/dev/null
+  find castle-rag-dashboard-2/models -type f -print0 2>/dev/null; } \
+    | xargs -0 -P 32 cat >/dev/null 2>&1
+echo "[setup] cache warm in $(($(date +%s)-_t))s"
+
+echo "[setup] starting app on $(hostname) with local venv"
+${PYTHON} castle-rag-dashboard-2/app.py

@@ -21,23 +21,59 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+_t0_pipeline_import = time.perf_counter()
+print(f"[pipeline] module importing (os, time, functools, pathlib done)", flush=True)
+
 # ── paths ────────────────────────────────────────────────────────────────────
 
 _BASE = "/gpfs/scratch1/shared/group_h/data_goncalo"
+_LOCAL = Path(__file__).resolve().parents[1]  # castle-rag-dashboard-2/
 
 VISUAL_INDEX_DIR: str = os.getenv(
     "VISUAL_INDEX_DIR",
-    f"{_BASE}/artifacts/siglip_index_day1",
+    str(_LOCAL / "indexes/siglip_index_day1"),
 )
 TRANSCRIPT_INDEX_DIR: str = os.getenv(
     "TRANSCRIPT_INDEX_DIR",
-    f"{_BASE}/artifacts/transcript_index_day1",
+    str(_LOCAL / "indexes/transcript_index_day1"),
+)
+# Local (home6) copy, consistent with MiniLM/QA below. The shared-scratch
+# original (/gpfs/scratch1/shared/group_h/models/...) is heavily contended and
+# made model load take 7–15 min on startup; the home copy loads in seconds.
+SIGLIP_TEXT_MODEL_DIR: str = os.getenv(
+    "SIGLIP_TEXT_MODEL_NAME",
+    str(_LOCAL / "models/siglip2-so400m-patch16-512-text"),
+)
+MINILM_MODEL_DIR: str = os.getenv(
+    "MINILM_MODEL_DIR",
+    str(_LOCAL / "models/all-MiniLM-L6-v2"),
+)
+QA_MODEL_DIR: str = os.getenv(
+    "ANSWER_SPAN_QA_MODEL",
+    str(_LOCAL / "models/distilbert-base-cased-distilled-squad"),
 )
 DIVERSITY_WINDOW_SEC = float(os.getenv("VISUAL_DIVERSITY_WINDOW_SEC", "30"))
 CANDIDATE_MULTIPLIER = int(os.getenv("VISUAL_CANDIDATE_MULTIPLIER", "5"))
 
 # Reverse lookup: keyframe_path → FAISS row index (built lazily after index load)
 _keyframe_to_row: dict[str, int] = {}
+
+# Force HuggingFace offline. Snellius compute nodes have no internet, so any
+# stray hub lookup (config/processor resolution that isn't covered by a
+# per-call local_files_only) blocks on connection timeouts with retries —
+# this caused a ~5 min stall during SigLIP processor/model load. All weights
+# are already local, so offline mode is strictly correct here. Must be set
+# before transformers/huggingface_hub are first imported (they're imported
+# lazily inside the load_* functions below, so this top-level runs first).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+# Push local paths into the environment so backend code (answer_span_highlight,
+# transcript_retrieval cross-encoder) picks them up via its own env-var checks.
+os.environ.setdefault("SIGLIP_TEXT_MODEL_NAME", SIGLIP_TEXT_MODEL_DIR)
+os.environ.setdefault("MINILM_MODEL_DIR", MINILM_MODEL_DIR)
+os.environ.setdefault("ANSWER_SPAN_QA_MODEL", QA_MODEL_DIR)
+print(f"[pipeline] module top-level done in {time.perf_counter()-_t0_pipeline_import:.2f}s", flush=True)
 
 # ── path remapping (old /scratch-shared/ mount → /gpfs/scratch1/shared/) ────
 
@@ -59,10 +95,15 @@ def _fix_item_paths(item: dict[str, Any]) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def _load_visual_index() -> tuple[Any, list[dict[str, Any]], str]:
     from src.retriever import load_index  # type: ignore[import]
+    _t = time.perf_counter()
+    print(f"[pipeline] _load_visual_index: reading FAISS index from {VISUAL_INDEX_DIR} …", flush=True)
     index, metadata, model_name = load_index(VISUAL_INDEX_DIR)
+    print(f"[pipeline] _load_visual_index: FAISS done in {time.perf_counter()-_t:.2f}s ({len(metadata)} items)", flush=True)
     model_name = _fix_path(model_name)
+    print(f"[pipeline] _load_visual_index: fixing item paths …", flush=True)
     for item in metadata:
         _fix_item_paths(item)
+    print(f"[pipeline] _load_visual_index: done in {time.perf_counter()-_t:.2f}s total", flush=True)
     return index, metadata, model_name
 
 
@@ -94,7 +135,22 @@ def _load_siglip_text_model() -> tuple[Any, Any, Any]:
     from src.clip_retrieval import load_clip_text_model  # type: ignore[import]
     _, _, model_name = _load_visual_index()
     query_model_name = _resolve_query_model_name(model_name)
-    return load_clip_text_model(query_model_name, local_files_only=False)
+    print(f"[pipeline] _load_siglip_text_model: loading from {query_model_name} …", flush=True)
+
+    # Time imports and weight load separately — the first torch/transformers
+    # import and the (slow) weight read used to be lumped into one number,
+    # which hid that the model path, not the import, was the bottleneck.
+    _t = time.perf_counter()
+    import torch  # noqa: F401  (cached; surfaces cold-import cost on its own line)
+    print(f"[pipeline]   import torch: {time.perf_counter()-_t:.2f}s", flush=True)
+    _t = time.perf_counter()
+    import transformers  # noqa: F401
+    print(f"[pipeline]   import transformers: {time.perf_counter()-_t:.2f}s", flush=True)
+
+    _t = time.perf_counter()
+    result = load_clip_text_model(query_model_name, local_files_only=True)
+    print(f"[pipeline]   load weights+processor: {time.perf_counter()-_t:.2f}s", flush=True)
+    return result
 
 
 @lru_cache(maxsize=1)
@@ -102,7 +158,7 @@ def _load_siglip_full_model() -> tuple[Any, Any, Any]:
     """Full image+text SigLIP model — only needed for dino-siglip-rerank grounding."""
     from src.clip_retrieval import load_clip_model  # type: ignore[import]
     _, _, model_name = _load_visual_index()
-    return load_clip_model(model_name, local_files_only=False)
+    return load_clip_model(model_name, local_files_only=True)
 
 
 # ── public retrieval API ────────────────────────────────────────────────────
@@ -243,11 +299,27 @@ def recommend_keywords(
 
 
 @lru_cache(maxsize=1)
+def _load_transcript_index() -> tuple[Any, list[dict[str, Any]], str]:
+    from src.retriever import load_index  # type: ignore[import]
+    _t = time.perf_counter()
+    print(f"[pipeline] _load_transcript_index: reading from {TRANSCRIPT_INDEX_DIR} …", flush=True)
+    index, metadata, model_name = load_index(TRANSCRIPT_INDEX_DIR)
+    print(f"[pipeline] _load_transcript_index: done in {time.perf_counter()-_t:.2f}s ({len(metadata)} items, model={model_name})", flush=True)
+    for item in metadata:
+        _fix_item_paths(item)
+    return index, metadata, model_name
+
+
+@lru_cache(maxsize=1)
 def _load_minilm_model() -> Any:
     """Load the same MiniLM model used by transcript dense retrieval, cached."""
-    from src.retriever import load_embedding_model, load_index  # type: ignore[import]
-    _, _, model_name = load_index(TRANSCRIPT_INDEX_DIR)
-    return load_embedding_model(model_name)
+    from src.retriever import load_embedding_model  # type: ignore[import]
+    _, _, model_name = _load_transcript_index()
+    _t = time.perf_counter()
+    print(f"[pipeline] _load_minilm_model: loading SentenceTransformer from {model_name} …", flush=True)
+    result = load_embedding_model(model_name)
+    print(f"[pipeline] _load_minilm_model: done in {time.perf_counter()-_t:.2f}s", flush=True)
+    return result
 
 
 def recommend_keywords_semantic(
@@ -428,8 +500,7 @@ def get_transcript_context(
     window_sec: float = 120.0,
 ) -> list[dict[str, Any]]:
     """Return transcript chunks from the same source/hour within ±window_sec."""
-    from src.retriever import load_index  # type: ignore[import]
-    _, metadata, _ = load_index(TRANSCRIPT_INDEX_DIR)
+    _, metadata, _ = _load_transcript_index()
     chunks = [
         item for item in metadata
         if item.get("source_name") == source_name
@@ -542,14 +613,18 @@ def retrieve_visual_from_embedding(
 
 def get_available_viewpoints() -> list[str]:
     """Return sorted list of source_name values from the visual index."""
+    _t = time.perf_counter()
+    print("[pipeline] get_available_viewpoints: calling _load_visual_index …", flush=True)
     _, metadata, _ = _load_visual_index()
-    return sorted({item.get("source_name", "") for item in metadata if item.get("source_name")})
+    print(f"[pipeline] get_available_viewpoints: index loaded in {time.perf_counter()-_t:.2f}s, building source_name set …", flush=True)
+    result = sorted({item.get("source_name", "") for item in metadata if item.get("source_name")})
+    print(f"[pipeline] get_available_viewpoints: done in {time.perf_counter()-_t:.2f}s ({len(result)} viewpoints)", flush=True)
+    return result
 
 
 def get_stats() -> dict[str, int]:
-    from src.retriever import load_index  # type: ignore[import]
     _, v_meta, _ = _load_visual_index()
-    _, t_meta, _ = load_index(TRANSCRIPT_INDEX_DIR)
+    _, t_meta, _ = _load_transcript_index()
     return {
         "total_keyframes": len(v_meta),
         "transcript_chunks": len(t_meta),

@@ -1,0 +1,11 @@
+{
+  "dataset_root": "/scratch-shared/group_h/data_goncalo/day1",
+  "output_dir": "artifacts/siglip_index_day1",
+  "model_name": "/scratch-shared/group_h/models/siglip2-so400m-patch16-512",
+  "keyframes": 83718,
+  "embeddings_path": "artifacts/siglip_index_day1/embeddings.npy",
+  "elapsed_sec": 7510.746774968924,
+  "keyframes_per_sec": 11.146428245857933,
+  "resumed_from_keyframes": 0,
+  "batch_size": 64
+}

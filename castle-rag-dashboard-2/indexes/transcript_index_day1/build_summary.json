@@ -1,0 +1,12 @@
+{
+  "transcripts_dir": "all_transcripts",
+  "output_dir": "artifacts/transcript_index_day1",
+  "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+  "day": "day1",
+  "chunks": 41769,
+  "device": "cuda",
+  "local_files_only": true,
+  "batch_size": 128,
+  "elapsed_sec": 190.73267503688112,
+  "chunks_per_sec": 218.99236715430808
+}
