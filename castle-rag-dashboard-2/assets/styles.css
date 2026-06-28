@@ -218,6 +218,142 @@ label {
   background: #eff6ff;
 }
 
+.keyword-chip-selected,
+.keyword-chip-selected:hover {
+    color: #ffffff;
+    border-color: #2563eb;
+    background: #2563eb;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+}
+
+.startup-status-panel {
+    margin: 0.65rem 0 0.9rem;
+    padding: 0.75rem;
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    background: #eff6ff;
+}
+
+#evidence-panel {
+    scroll-margin-top: 18px;
+}
+
+.startup-status-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    color: #1e3a8a;
+    font-size: 0.8rem;
+    font-weight: 700;
+}
+
+.startup-progress-track {
+    height: 8px;
+    margin-top: 0.55rem;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #dbeafe;
+}
+
+.startup-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #2563eb, #14b8a6);
+    transition: width 300ms ease;
+}
+
+.startup-detail {
+    margin-top: 0.45rem;
+    color: #475569;
+    font-size: 0.73rem;
+    line-height: 1.35;
+}
+
+.startup-ready {
+    display: none;
+}
+
+.startup-ready .startup-status-heading {
+    color: #065f46;
+}
+
+.startup-failed {
+    border-color: #fecaca;
+    background: #fef2f2;
+}
+
+.startup-failed .startup-status-heading,
+.startup-failed .startup-detail {
+    color: #991b1b;
+}
+
+.evaluation-panel {
+    border: 1px solid rgba(124, 58, 237, 0.28);
+    box-shadow: 0 12px 30px rgba(76, 29, 149, 0.08);
+}
+
+.evaluation-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.evaluation-heading h2 {
+    margin: 0;
+}
+
+.evaluation-badge {
+    border-radius: 999px;
+    padding: 0.25rem 0.55rem;
+    color: #6d28d9;
+    background: #ede9fe;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.evaluation-task-input {
+    min-height: 88px;
+}
+
+.evaluation-start-button,
+.evaluation-stop-button {
+    width: 100%;
+    margin-top: 0.75rem;
+    border: 0;
+    border-radius: 10px;
+    padding: 0.72rem 0.9rem;
+    color: white;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.evaluation-start-button {
+    background: #7c3aed;
+}
+
+.evaluation-start-button:hover {
+    background: #6d28d9;
+}
+
+.evaluation-stop-button {
+    background: #dc2626;
+}
+
+.evaluation-stop-button:hover {
+    background: #b91c1c;
+}
+
+.evaluation-status {
+    margin-top: 0.65rem;
+    color: #64748b;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
 .keyword-empty {
   color: var(--muted);
   font-size: 12px;
@@ -809,6 +945,25 @@ details[open] .transcript-summary::before {
 /* ── Transcript heatmap + extractive QA answer span ──────────────────────── */
 .transcript-heatmap-block {
   padding: 4px 0;
+}
+
+.transcript-highlight-details {
+    margin-bottom: 0.9rem;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 10px;
+    background: rgba(255, 251, 235, 0.72);
+    overflow: hidden;
+}
+
+.transcript-highlight-details > summary {
+    padding: 0.7rem 0.85rem;
+    cursor: pointer;
+    color: #92400e;
+    font-weight: 700;
+}
+
+.transcript-highlight-details .transcript-heatmap-block {
+    padding: 0 0.85rem 0.85rem;
 }
 
 .heatmap-text {

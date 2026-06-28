@@ -312,7 +312,8 @@ def load_minilm_model() -> Any | None:
     try:
         from sentence_transformers import SentenceTransformer
 
-        return SentenceTransformer(MINILM_MODEL_NAME, local_files_only=True)
+        model_name = os.environ.get("MINILM_MODEL_DIR", MINILM_MODEL_NAME)
+        return SentenceTransformer(model_name, local_files_only=True)
     except Exception:
         return None
 

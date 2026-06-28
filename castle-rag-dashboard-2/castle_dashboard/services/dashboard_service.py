@@ -247,13 +247,19 @@ class DashboardService:
         self,
         filters: "SearchFilters",
         refined_visual: list[dict[str, Any]],
+        modality_feedback: dict[str, int] | None = None,
     ) -> list["RetrievalResult"]:
         """Re-run routing + mixing with Rocchio-refined visual results, reusing
         the cached transcript results so we don't re-embed the query."""
         top_k = max(1, min(filters.top_k, 100))
         t0 = time.perf_counter()
 
-        chosen = _pipeline.route(self._last_query, refined_visual, self._last_transcript_results)
+        chosen = _pipeline.route(
+            self._last_query,
+            refined_visual,
+            self._last_transcript_results,
+            feedback=modality_feedback,
+        )
         router_debug = chosen.get("router_debug", {})
         mixed = _pipeline.get_mixed_evidence(
             self._last_query, refined_visual, self._last_transcript_results,

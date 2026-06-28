@@ -41,9 +41,11 @@ def build_evidence_viewer(
                     ),
                     html.A(
                         "▶ YouTube",
+                        id="youtube-evidence-link",
                         href=youtube_url,
                         target="_blank",
                         className="yt-link",
+                        n_clicks=0,
                     ) if youtube_url else None,
                 ],
             ),
@@ -69,6 +71,7 @@ def _visual_evidence_body(
         _grounding_bar(grounding) if grounding else None,
         # Collapsible transcript — hidden by default, no callback needed
         html.Details(
+            id="visual-transcript-details",
             className="transcript-details",
             children=[
                 html.Summary("Transcript", className="transcript-summary"),
@@ -129,9 +132,11 @@ def _image_area(result: RetrievalResult, grounding: dict[str, Any] | None) -> ht
         children.append(
             html.A(
                 "View original frame",
+                id="original-frame-link",
                 href=orig_src,
                 target="_blank",
                 className="orig-frame-link",
+                n_clicks=0,
             )
         )
 
@@ -168,16 +173,28 @@ def _transcript_tab(
     transcript_evidence: dict[str, Any] | None = None,
 ) -> html.Div:
     rows = []
+    context_rows_added = False
 
-    # If a transcript heatmap was computed for this exact result, render it
-    # instead of the plain ±2 min context — it highlights the words the QA
-    # model and heatmap scorer think are relevant to the query.
+    # QA is an overlay, not a replacement. The highlighted selected passage can
+    # be collapsed while the complete ±2 minute transcript remains visible.
     heatmap = (transcript_evidence or {}).get("transcript_heatmap")
     if heatmap and result.modality == "transcript":
-        rows.append(_heatmap_block(transcript_evidence))
+        rows.append(
+            html.Details(
+                open=True,
+                className="transcript-highlight-details",
+                children=[
+                    html.Summary(
+                        "QA answer and relevance overlay — click to hide",
+                        className="transcript-summary",
+                    ),
+                    _heatmap_block(transcript_evidence),
+                ],
+            )
+        )
 
     # Context chunks from transcript index (±2 min window)
-    if not heatmap and context:
+    if context:
         for chunk in context:
             start = chunk.get("start_sec", 0)
             end = chunk.get("end_sec", start)
@@ -196,9 +213,11 @@ def _transcript_tab(
                     ],
                 )
             )
+            context_rows_added = True
 
-    # Fall back to result's own transcript segments if no context
-    if not rows:
+    # Fall back to result's own transcript segments if no context. A heatmap
+    # overlay does not count as transcript context for this decision.
+    if not context_rows_added:
         for seg in result.transcript:
             rows.append(
                 html.Div(

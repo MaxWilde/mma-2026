@@ -1,8 +1,4 @@
-import time as _time
-
 from dash import dcc, html
-
-from castle_dashboard.services.dashboard_service import dashboard_service
 
 MODALITY_OPTIONS = [
     {"label": "Transcript (speech → text search)", "value": "transcript"},
@@ -11,14 +7,7 @@ MODALITY_OPTIONS = [
 
 
 def build_search_panel() -> html.Aside:
-    _t = _time.perf_counter()
-    print("[search_panel] build_search_panel: calling get_available_viewpoints …", flush=True)
-    _vp = dashboard_service.get_available_viewpoints()
-    print(f"[search_panel] build_search_panel: get_available_viewpoints returned in {_time.perf_counter()-_t:.2f}s", flush=True)
-    viewpoints = [{"label": "All viewpoints", "value": "All"}] + [
-        {"label": v, "value": v} for v in _vp
-    ]
-    print(f"[search_panel] build_search_panel: layout built in {_time.perf_counter()-_t:.2f}s ({len(viewpoints)-1} viewpoints)", flush=True)
+    viewpoints = [{"label": "All viewpoints", "value": "All"}]
     return html.Aside(
         className="sidebar",
         children=[
@@ -38,6 +27,32 @@ def build_search_panel() -> html.Aside:
                 className="panel compact-panel",
                 children=[
                     html.H2("Search"),
+                    html.Div(
+                        id="startup-status-panel",
+                        className="startup-status-panel",
+                        children=[
+                            html.Div(
+                                [
+                                    html.Span("Starting dashboard", id="startup-stage"),
+                                    html.Span("0%", id="startup-percent"),
+                                ],
+                                className="startup-status-heading",
+                            ),
+                            html.Div(
+                                html.Div(
+                                    id="startup-progress-fill",
+                                    className="startup-progress-fill",
+                                    style={"width": "0%"},
+                                ),
+                                className="startup-progress-track",
+                            ),
+                            html.Div(
+                                "Waiting for model warmup…",
+                                id="startup-detail",
+                                className="startup-detail",
+                            ),
+                        ],
+                    ),
                     html.Label("Natural-language query", htmlFor="query-input"),
                     dcc.Textarea(
                         id="query-input",
@@ -75,6 +90,7 @@ def build_search_panel() -> html.Aside:
                         id="search-button",
                         n_clicks=0,
                         className="primary-button",
+                        disabled=True,
                     ),
                     dcc.Loading(
                         type="dot",
@@ -104,6 +120,38 @@ def build_search_panel() -> html.Aside:
                                 className="feedback-count",
                             ),
                         ],
+                    ),
+                ],
+            ),
+            html.Section(
+                id="evaluation-panel",
+                className="panel compact-panel evaluation-panel",
+                style={"display": "none"},
+                children=[
+                    html.Div(
+                        className="evaluation-heading",
+                        children=[
+                            html.H2("Expert evaluation"),
+                            html.Span("Optional logger", className="evaluation-badge"),
+                        ],
+                    ),
+                    html.Label("Task prompt", htmlFor="evaluation-task-prompt"),
+                    dcc.Textarea(
+                        id="evaluation-task-prompt",
+                        value="",
+                        placeholder="Paste one evaluation task prompt…",
+                        className="query-input evaluation-task-input",
+                    ),
+                    html.Button(
+                        "Start evaluation task",
+                        id="evaluation-toggle-button",
+                        n_clicks=0,
+                        className="evaluation-start-button",
+                    ),
+                    html.Div(
+                        "Evaluation mode is ready.",
+                        id="evaluation-status",
+                        className="evaluation-status",
                     ),
                 ],
             ),

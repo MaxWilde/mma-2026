@@ -29,7 +29,7 @@ def load_embedding_model(model_name: str = DEFAULT_MODEL_NAME):
         ) from exc
 
     model = SentenceTransformer(model_name, local_files_only=True)
-    print("Loaded embedding model from local cache")
+    print(f"Loaded embedding model from local files: {model_name}")
     return model
 
 

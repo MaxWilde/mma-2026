@@ -21,59 +21,97 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-_t0_pipeline_import = time.perf_counter()
-print(f"[pipeline] module importing (os, time, functools, pathlib done)", flush=True)
+# Compute nodes are offline. Prevent Hugging Face from spending minutes retrying
+# network requests before falling back to files that are already available.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # ── paths ────────────────────────────────────────────────────────────────────
 
 _BASE = "/gpfs/scratch1/shared/group_h/data_goncalo"
-_LOCAL = Path(__file__).resolve().parents[1]  # castle-rag-dashboard-2/
+_SHARED_MODELS = Path("/gpfs/scratch1/shared/group_h/models")
+_DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _complete_model_dir(path: Path) -> bool:
+    """Return true only when a local model directory includes actual weights."""
+    if not path.is_dir():
+        return False
+    return any(
+        candidate.is_file()
+        for pattern in ("*.safetensors", "pytorch_model*.bin", "model*.bin")
+        for candidate in path.glob(pattern)
+    )
+
+
+def _complete_index_dir(path: Path) -> bool:
+    return (path / "transcript.faiss").is_file() and (path / "metadata.json").is_file()
+
+
+def _preferred_index(env_name: str, local_name: str, shared_path: str) -> str:
+    configured = os.getenv(env_name)
+    if configured:
+        return configured
+    local_path = _DASHBOARD_ROOT / "indexes" / local_name
+    return str(local_path if _complete_index_dir(local_path) else Path(shared_path))
+
+
+def _preferred_model(
+    env_name: str,
+    local_name: str,
+    shared_name: str,
+    *,
+    fallback_name: str | None = None,
+) -> str:
+    configured = os.getenv(env_name)
+    if configured:
+        return configured
+    local_path = _DASHBOARD_ROOT / "models" / local_name
+    if _complete_model_dir(local_path):
+        return str(local_path)
+    shared_path = _SHARED_MODELS / shared_name
+    if _complete_model_dir(shared_path):
+        return str(shared_path)
+    return fallback_name or str(shared_path)
 
 VISUAL_INDEX_DIR: str = os.getenv(
+    "VISUAL_INDEX_DIR"
+) or _preferred_index(
     "VISUAL_INDEX_DIR",
-    str(_LOCAL / "indexes/siglip_index_day1"),
+    "siglip_index_day1",
+    f"{_BASE}/artifacts/siglip_index_day1",
 )
 TRANSCRIPT_INDEX_DIR: str = os.getenv(
+    "TRANSCRIPT_INDEX_DIR"
+) or _preferred_index(
     "TRANSCRIPT_INDEX_DIR",
-    str(_LOCAL / "indexes/transcript_index_day1"),
+    "transcript_index_day1",
+    f"{_BASE}/artifacts/transcript_index_day1",
 )
-# Local (home6) copy, consistent with MiniLM/QA below. The shared-scratch
-# original (/gpfs/scratch1/shared/group_h/models/...) is heavily contended and
-# made model load take 7–15 min on startup; the home copy loads in seconds.
-SIGLIP_TEXT_MODEL_DIR: str = os.getenv(
+SIGLIP_TEXT_MODEL_DIR = _preferred_model(
     "SIGLIP_TEXT_MODEL_NAME",
-    str(_LOCAL / "models/siglip2-so400m-patch16-512-text"),
+    "siglip2-so400m-patch16-512-text",
+    "siglip2-so400m-patch16-512-text",
 )
-MINILM_MODEL_DIR: str = os.getenv(
+MINILM_MODEL_DIR = _preferred_model(
     "MINILM_MODEL_DIR",
-    str(_LOCAL / "models/all-MiniLM-L6-v2"),
+    "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2",
+    fallback_name="sentence-transformers/all-MiniLM-L6-v2",
 )
-QA_MODEL_DIR: str = os.getenv(
+QA_MODEL_DIR = _preferred_model(
     "ANSWER_SPAN_QA_MODEL",
-    str(_LOCAL / "models/distilbert-base-cased-distilled-squad"),
+    "distilbert-base-cased-distilled-squad",
+    "distilbert-base-cased-distilled-squad",
 )
+os.environ.setdefault("SIGLIP_TEXT_MODEL_NAME", SIGLIP_TEXT_MODEL_DIR)
+os.environ.setdefault("MINILM_MODEL_DIR", MINILM_MODEL_DIR)
+os.environ.setdefault("ANSWER_SPAN_QA_MODEL", QA_MODEL_DIR)
 DIVERSITY_WINDOW_SEC = float(os.getenv("VISUAL_DIVERSITY_WINDOW_SEC", "30"))
 CANDIDATE_MULTIPLIER = int(os.getenv("VISUAL_CANDIDATE_MULTIPLIER", "5"))
 
 # Reverse lookup: keyframe_path → FAISS row index (built lazily after index load)
 _keyframe_to_row: dict[str, int] = {}
-
-# Force HuggingFace offline. Snellius compute nodes have no internet, so any
-# stray hub lookup (config/processor resolution that isn't covered by a
-# per-call local_files_only) blocks on connection timeouts with retries —
-# this caused a ~5 min stall during SigLIP processor/model load. All weights
-# are already local, so offline mode is strictly correct here. Must be set
-# before transformers/huggingface_hub are first imported (they're imported
-# lazily inside the load_* functions below, so this top-level runs first).
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-# Push local paths into the environment so backend code (answer_span_highlight,
-# transcript_retrieval cross-encoder) picks them up via its own env-var checks.
-os.environ.setdefault("SIGLIP_TEXT_MODEL_NAME", SIGLIP_TEXT_MODEL_DIR)
-os.environ.setdefault("MINILM_MODEL_DIR", MINILM_MODEL_DIR)
-os.environ.setdefault("ANSWER_SPAN_QA_MODEL", QA_MODEL_DIR)
-print(f"[pipeline] module top-level done in {time.perf_counter()-_t0_pipeline_import:.2f}s", flush=True)
 
 # ── path remapping (old /scratch-shared/ mount → /gpfs/scratch1/shared/) ────
 
@@ -95,15 +133,10 @@ def _fix_item_paths(item: dict[str, Any]) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def _load_visual_index() -> tuple[Any, list[dict[str, Any]], str]:
     from src.retriever import load_index  # type: ignore[import]
-    _t = time.perf_counter()
-    print(f"[pipeline] _load_visual_index: reading FAISS index from {VISUAL_INDEX_DIR} …", flush=True)
     index, metadata, model_name = load_index(VISUAL_INDEX_DIR)
-    print(f"[pipeline] _load_visual_index: FAISS done in {time.perf_counter()-_t:.2f}s ({len(metadata)} items)", flush=True)
     model_name = _fix_path(model_name)
-    print(f"[pipeline] _load_visual_index: fixing item paths …", flush=True)
     for item in metadata:
         _fix_item_paths(item)
-    print(f"[pipeline] _load_visual_index: done in {time.perf_counter()-_t:.2f}s total", flush=True)
     return index, metadata, model_name
 
 
@@ -120,7 +153,7 @@ def _resolve_query_model_name(index_model_name: str) -> str:
     text-only SigLIP/SigLIP2 sibling model so query embedding doesn't have to
     load the (unused) vision tower."""
     env_text_model = os.environ.get("SIGLIP_TEXT_MODEL_NAME")
-    if env_text_model:
+    if env_text_model and _complete_model_dir(Path(env_text_model)):
         return env_text_model
     path = Path(index_model_name)
     if path.exists():
@@ -135,22 +168,7 @@ def _load_siglip_text_model() -> tuple[Any, Any, Any]:
     from src.clip_retrieval import load_clip_text_model  # type: ignore[import]
     _, _, model_name = _load_visual_index()
     query_model_name = _resolve_query_model_name(model_name)
-    print(f"[pipeline] _load_siglip_text_model: loading from {query_model_name} …", flush=True)
-
-    # Time imports and weight load separately — the first torch/transformers
-    # import and the (slow) weight read used to be lumped into one number,
-    # which hid that the model path, not the import, was the bottleneck.
-    _t = time.perf_counter()
-    import torch  # noqa: F401  (cached; surfaces cold-import cost on its own line)
-    print(f"[pipeline]   import torch: {time.perf_counter()-_t:.2f}s", flush=True)
-    _t = time.perf_counter()
-    import transformers  # noqa: F401
-    print(f"[pipeline]   import transformers: {time.perf_counter()-_t:.2f}s", flush=True)
-
-    _t = time.perf_counter()
-    result = load_clip_text_model(query_model_name, local_files_only=True)
-    print(f"[pipeline]   load weights+processor: {time.perf_counter()-_t:.2f}s", flush=True)
-    return result
+    return load_clip_text_model(query_model_name, local_files_only=True)
 
 
 @lru_cache(maxsize=1)
@@ -212,12 +230,24 @@ def retrieve_visual(question: str, top_k: int = 20, *, use_query_variants: bool 
 
 def retrieve_transcript(question: str, top_k: int = 20) -> list[dict[str, Any]]:
     """Transcript evidence retrieval — dense (MiniLM) + lexical (BM25) candidates,
-    fused with RRF, then reranked with a cross-encoder (or MiniLM fallback if the
-    cross-encoder model isn't cached locally)."""
+    fused with RRF, then reranked with MiniLM by default. A local cross-encoder
+    such as BGE can still be enabled explicitly through the environment."""
     from src.transcript_retrieval import retrieve_transcript_evidence  # type: ignore[import]
 
     t0 = time.perf_counter()
-    results = retrieve_transcript_evidence(question, TRANSCRIPT_INDEX_DIR, top_k=top_k, align_playback=True)
+    reranker_model = os.environ.get(
+        "TRANSCRIPT_RERANKER_MODEL",
+        "minilm",
+    )
+    rerank_k = max(top_k, int(os.environ.get("TRANSCRIPT_RERANK_K", "50")))
+    results = retrieve_transcript_evidence(
+        question,
+        TRANSCRIPT_INDEX_DIR,
+        top_k=top_k,
+        rerank_k=rerank_k,
+        cross_encoder_name=reranker_model,
+        align_playback=True,
+    )
     for item in results:
         _fix_item_paths(item)
     elapsed = time.perf_counter() - t0
@@ -229,12 +259,18 @@ def route(
     question: str,
     visual_results: list[dict[str, Any]],
     transcript_results: list[dict[str, Any]],
+    feedback: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Pick exactly one evidence mode (visual or transcript) for `question`,
     given each channel's top candidate. Returns the chosen item plus a
     `router_debug` dict with the heuristic/raw/combined scores and reason."""
     from src.evidence_router import route_evidence  # type: ignore[import]
-    return route_evidence(question, visual_results, transcript_results)
+    return route_evidence(
+        question,
+        visual_results,
+        transcript_results,
+        feedback=feedback,
+    )
 
 
 def get_mixed_evidence(
@@ -300,11 +336,10 @@ def recommend_keywords(
 
 @lru_cache(maxsize=1)
 def _load_transcript_index() -> tuple[Any, list[dict[str, Any]], str]:
+    """Load transcript FAISS data once for context, statistics and keywords."""
     from src.retriever import load_index  # type: ignore[import]
-    _t = time.perf_counter()
-    print(f"[pipeline] _load_transcript_index: reading from {TRANSCRIPT_INDEX_DIR} …", flush=True)
+
     index, metadata, model_name = load_index(TRANSCRIPT_INDEX_DIR)
-    print(f"[pipeline] _load_transcript_index: done in {time.perf_counter()-_t:.2f}s ({len(metadata)} items, model={model_name})", flush=True)
     for item in metadata:
         _fix_item_paths(item)
     return index, metadata, model_name
@@ -312,14 +347,17 @@ def _load_transcript_index() -> tuple[Any, list[dict[str, Any]], str]:
 
 @lru_cache(maxsize=1)
 def _load_minilm_model() -> Any:
-    """Load the same MiniLM model used by transcript dense retrieval, cached."""
+    """Load the transcript/keyword MiniLM model once from local offline files."""
     from src.retriever import load_embedding_model  # type: ignore[import]
-    _, _, model_name = _load_transcript_index()
-    _t = time.perf_counter()
-    print(f"[pipeline] _load_minilm_model: loading SentenceTransformer from {model_name} …", flush=True)
-    result = load_embedding_model(model_name)
-    print(f"[pipeline] _load_minilm_model: done in {time.perf_counter()-_t:.2f}s", flush=True)
-    return result
+
+    _, _, indexed_model_name = _load_transcript_index()
+    configured = os.environ.get("MINILM_MODEL_DIR")
+    model_name = (
+        configured
+        if configured and _complete_model_dir(Path(configured))
+        else indexed_model_name
+    )
+    return load_embedding_model(model_name)
 
 
 def recommend_keywords_semantic(
@@ -472,16 +510,10 @@ def run_grounding(query: str, chunk: dict[str, Any]) -> dict[str, Any]:
     from src.visual_grounding import GroundingConfig, ground_visual_evidence  # type: ignore[import]
     config = GroundingConfig()
     result = ground_visual_evidence(query, chunk, config=config)
-    output_image_path = None
-    if result.output_image_path:
-        output_path = Path(result.output_image_path)
-        try:
-            output_image_path = str(output_path.relative_to(_BASE))
-        except ValueError:
-            try:
-                output_image_path = str(output_path.relative_to(Path(_BASE)))
-            except ValueError:
-                output_image_path = str(output_path)
+    # visual_grounding returns a path relative to the checked-in repository
+    # when possible (normally artifacts/visual_grounding/<file>). Preserve that
+    # route-relative path instead of incorrectly resolving it under _BASE.
+    output_image_path = str(result.output_image_path) if result.output_image_path else None
     return {
         "keyframe_path": result.keyframe_path,
         "output_image_path": output_image_path,
@@ -613,13 +645,8 @@ def retrieve_visual_from_embedding(
 
 def get_available_viewpoints() -> list[str]:
     """Return sorted list of source_name values from the visual index."""
-    _t = time.perf_counter()
-    print("[pipeline] get_available_viewpoints: calling _load_visual_index …", flush=True)
     _, metadata, _ = _load_visual_index()
-    print(f"[pipeline] get_available_viewpoints: index loaded in {time.perf_counter()-_t:.2f}s, building source_name set …", flush=True)
-    result = sorted({item.get("source_name", "") for item in metadata if item.get("source_name")})
-    print(f"[pipeline] get_available_viewpoints: done in {time.perf_counter()-_t:.2f}s ({len(result)} viewpoints)", flush=True)
-    return result
+    return sorted({item.get("source_name", "") for item in metadata if item.get("source_name")})
 
 
 def get_stats() -> dict[str, int]:

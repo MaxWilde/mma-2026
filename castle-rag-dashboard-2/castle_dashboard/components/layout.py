@@ -15,6 +15,16 @@ def build_layout() -> html.Div:
             dcc.Store(id="transcript-evidence", data=None),
             dcc.Store(id="feedback-store", data={"liked": [], "disliked": []}),
             dcc.Store(id="query-embedding-store", data=None),
+            dcc.Store(
+                id="selected-keywords-store",
+                data={"base_query": "", "terms": []},
+            ),
+            dcc.Store(id="evidence-scroll-request", data=None),
+            dcc.Store(id="evidence-scroll-sink", data=0),
+            dcc.Store(id="evaluation-state-store", data={"enabled": False, "active": False}),
+            dcc.Store(id="evaluation-event-sink", data=0),
+            dcc.Interval(id="evaluation-state-poll", interval=2000, n_intervals=0),
+            dcc.Interval(id="startup-state-poll", interval=1000, n_intervals=0),
             build_search_panel(),
             html.Main(
                 className="dashboard-main",
