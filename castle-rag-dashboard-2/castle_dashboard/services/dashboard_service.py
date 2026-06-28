@@ -3,7 +3,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
+_t0 = time.perf_counter()
+print("[dashboard_service] importing pipeline …", flush=True)
 from castle_dashboard import pipeline as _pipeline
+print(f"[dashboard_service] pipeline import done in {time.perf_counter()-_t0:.2f}s", flush=True)
 from castle_dashboard.models.schemas import (
     DashboardStats,
     ProjectionPoint,
