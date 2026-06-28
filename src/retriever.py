@@ -28,13 +28,9 @@ def load_embedding_model(model_name: str = DEFAULT_MODEL_NAME):
             "Install sentence-transformers to embed transcript chunks: pip install sentence-transformers"
         ) from exc
 
-    try:
-        model = SentenceTransformer(model_name, local_files_only=True)
-        print("Loaded embedding model from local cache")
-        return model
-    except Exception:
-        print("Local cache unavailable, trying online download")
-        return SentenceTransformer(model_name)
+    model = SentenceTransformer(model_name, local_files_only=True)
+    print(f"Loaded embedding model from local files: {model_name}")
+    return model
 
 
 def embed_texts(model: Any, texts: list[str], batch_size: int = 64) -> np.ndarray:

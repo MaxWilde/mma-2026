@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import traceback
+import re
+import time
 from typing import Any
 
 from dash import ALL, Dash, Input, Output, State, callback_context, html, no_update
@@ -9,9 +11,10 @@ from castle_dashboard.components.evidence_viewer import build_evidence_viewer
 from castle_dashboard.components.metrics import build_metrics
 from castle_dashboard.components.result_list import build_result_list
 from castle_dashboard.components.router_banner import build_router_banner
-from castle_dashboard.models.schemas import SearchFilters
+from castle_dashboard.models.schemas import DashboardStats, SearchFilters
 from castle_dashboard.services.dashboard_service import dashboard_service
 from castle_dashboard.services.evaluation_logger import evaluation_logger
+from castle_dashboard.services.startup_manager import startup_manager
 from castle_dashboard.utils.figures import (
     make_modality_figure,
     make_score_figure,
@@ -20,6 +23,65 @@ from castle_dashboard.utils.figures import (
 
 
 def register_callbacks(app: Dash) -> None:
+
+    # Bring newly selected or newly enriched evidence into view. This is
+    # client-side so scrolling is immediate and does not add a server request.
+    app.clientside_callback(
+        """
+        function(scrollRequest) {
+            if (!scrollRequest) {
+                return window.dash_clientside.no_update;
+            }
+            window.setTimeout(function() {
+                const panel = document.getElementById("evidence-panel");
+                if (panel) {
+                    panel.scrollIntoView({behavior: "smooth", block: "start"});
+                }
+            }, 120);
+            return Date.now();
+        }
+        """,
+        Output("evidence-scroll-sink", "data"),
+        Input("evidence-scroll-request", "data"),
+        prevent_initial_call=True,
+    )
+
+    # ── Startup progress and readiness ───────────────────────────────────────
+    @app.callback(
+        Output("startup-stage", "children"),
+        Output("startup-percent", "children"),
+        Output("startup-progress-fill", "style"),
+        Output("startup-detail", "children"),
+        Output("startup-status-panel", "className"),
+        Output("search-button", "disabled"),
+        Output("viewpoint-filter", "options"),
+        Input("startup-state-poll", "n_intervals"),
+    )
+    def update_startup_progress(_n_intervals):
+        state = startup_manager.snapshot()
+        percent = int(state.get("percent", 0))
+        status = state.get("status", "not_started")
+        detail = state.get("detail") or ""
+        elapsed = float(state.get("elapsed_seconds", 0.0))
+        if status == "loading":
+            detail = f"{detail} · elapsed {elapsed:.1f}s"
+        elif status == "ready":
+            grounding = state.get("grounding_status", "loading")
+            detail = f"{detail} · GroundingDINO: {grounding}"
+        panel_class = f"startup-status-panel startup-{status}"
+        viewpoints = [
+            {"label": viewpoint if viewpoint != "All" else "All viewpoints", "value": viewpoint}
+            for viewpoint in state.get("viewpoints", ["All"])
+        ]
+        return (
+            state.get("stage", "Starting dashboard"),
+            f"{percent}%",
+            {"width": f"{percent}%"},
+            detail,
+            panel_class,
+            not bool(state.get("ready")),
+            viewpoints,
+        )
 
     # ── 0. Optional externally-enabled expert evaluation controls ────────────
     @app.callback(
@@ -160,6 +222,10 @@ def register_callbacks(app: Dash) -> None:
         Output("query-embedding-store", "data"),
         Output("feedback-store", "data"),
         Output("search-error", "children"),
+        Output("selected-result-id", "data", allow_duplicate=True),
+        Output("grounding-result", "data", allow_duplicate=True),
+        Output("transcript-evidence", "data", allow_duplicate=True),
+        Output("selected-keywords-store", "data"),
         Input("search-button", "n_clicks"),
         State("query-input", "value"),
         State("modality-filter", "value"),
@@ -201,7 +267,17 @@ def register_callbacks(app: Dash) -> None:
                 },
             )
             print(f"[dashboard] search callback returning {len(results)} results", flush=True)
-            return [r.id for r in results], embedding, {"liked": [], "disliked": []}, ""
+            result_ids = [r.id for r in results]
+            return (
+                result_ids,
+                embedding,
+                {"liked": [], "disliked": []},
+                "",
+                result_ids[0] if result_ids else None,
+                None,
+                None,
+                {"base_query": query or "", "terms": []},
+            )
         except Exception as exc:
             evaluation_logger.log_event(
                 "search_failed",
@@ -210,11 +286,20 @@ def register_callbacks(app: Dash) -> None:
             print("[dashboard] search callback failed", flush=True)
             traceback.print_exc()
             message = f"Search failed: {type(exc).__name__}: {exc}"
-            return [], None, {"liked": [], "disliked": []}, message
+            return (
+                [],
+                None,
+                {"liked": [], "disliked": []},
+                message,
+                None,
+                None,
+                None,
+                {"base_query": query or "", "terms": []},
+            )
 
     # ── 1a. Clear stale keyword chips the instant Search is clicked ──────────
     # Fires immediately on button click (before run_search returns), so the
-    # old chips disappear rather than lingering through retrieval + Qwen latency.
+    # old chips disappear rather than lingering through retrieval + keyword ranking.
     @app.callback(
         Output("keyword-suggestions", "children", allow_duplicate=True),
         Input("search-button", "n_clicks"),
@@ -227,17 +312,18 @@ def register_callbacks(app: Dash) -> None:
     @app.callback(
         Output("keyword-suggestions", "children"),
         Input("filtered-result-ids", "data"),
+        Input("selected-keywords-store", "data"),
         State("query-input", "value"),
         prevent_initial_call=True,
     )
-    def update_keyword_suggestions(result_ids, query):
+    def update_keyword_suggestions(result_ids, selected_keywords, query):
         if not (query or "").strip():
             return html.Div("Enter a query to get recommended keywords.", className="keyword-empty")
         if not result_ids:
             return html.Div("No keyword suggestions available.", className="keyword-empty")
         try:
             payload = dashboard_service.compute_keyword_suggestions()
-            return build_keyword_suggestions(payload)
+            return build_keyword_suggestions(payload, selected_keywords, query)
         except Exception:
             print("[dashboard] keyword suggestion callback failed", flush=True)
             traceback.print_exc()
@@ -246,35 +332,57 @@ def register_callbacks(app: Dash) -> None:
     # ── 1c. Add a recommended keyword to the query box ───────────────────────
     @app.callback(
         Output("query-input", "value"),
+        Output("selected-keywords-store", "data", allow_duplicate=True),
         Input({"type": "keyword-chip", "term": ALL}, "n_clicks"),
         State("query-input", "value"),
+        State("selected-keywords-store", "data"),
         prevent_initial_call=True,
     )
-    def append_keyword_to_query(_clicks, current_query):
+    def toggle_keyword_in_query(_clicks, current_query, selected_keywords):
         # Guard against spurious fires when chip components are created/re-created.
         # Dash fires ALL-pattern callbacks on component creation even though n_clicks=0;
         # the triggered list value tells us the actual click count on the firing component.
         triggered = callback_context.triggered
         if not triggered or not triggered[0].get("value"):
-            return no_update
+            return no_update, no_update
         trigger = callback_context.triggered_id
         if not isinstance(trigger, dict) or trigger.get("type") != "keyword-chip":
-            return no_update
+            return no_update, no_update
         term = str(trigger.get("term", "")).strip()
         if not term:
-            return no_update
+            return no_update, no_update
         current = (current_query or "").strip()
+        keyword_state = _normalise_keyword_state(selected_keywords, current)
+        selected = list(keyword_state["terms"])
+        base_query = keyword_state["base_query"]
+        is_selected = term in selected
+        if is_selected:
+            selected = [item for item in selected if item != term]
+            updated_query = _compose_keyword_query(base_query, selected)
+            action = "removed"
+        else:
+            # Suggestions already present in the user's own query should not be
+            # selectable. This guard also protects an older/stale chip.
+            if _contains_phrase(current, term):
+                return no_update, no_update
+            selected.append(term)
+            updated_query = _compose_keyword_query(base_query, selected)
+            action = "added"
         evaluation_logger.log_event(
             "keyword_clicked",
-            {"term": term, "query_before": current, "query_after": f"{current} {term}".strip()},
+            {
+                "term": term,
+                "action": action,
+                "query_before": current,
+                "query_after": updated_query,
+            },
         )
-        if term.lower() in current.lower():
-            return current_query
-        return f"{current} {term}".strip()
+        return updated_query, {"base_query": base_query, "terms": selected}
 
     # ── 2. Select result from card click or chart click ───────────────────────
     @app.callback(
         Output("selected-result-id", "data"),
+        Output("evidence-scroll-request", "data", allow_duplicate=True),
         Input({"type": "result-card", "index": ALL}, "n_clicks"),
         Input("score-chart", "clickData"),
         Input("timeline-chart", "clickData"),
@@ -286,7 +394,7 @@ def register_callbacks(app: Dash) -> None:
         if isinstance(trigger, dict) and trigger.get("type") == "result-card":
             triggered = callback_context.triggered
             if not triggered or not triggered[0].get("value"):
-                return current_id or no_update
+                return current_id or no_update, no_update
             result_id = trigger.get("index")
             evaluation_logger.log_event(
                 "result_selected",
@@ -296,7 +404,11 @@ def register_callbacks(app: Dash) -> None:
                     "result": _result_snapshot(dashboard_service.get_result(result_id)),
                 },
             )
-            return result_id
+            return result_id, {
+                "reason": "result_selected",
+                "result_id": result_id,
+                "nonce": time.time_ns(),
+            }
         click_data = {
             "score-chart": score_click,
             "timeline-chart": timeline_click,
@@ -311,7 +423,13 @@ def register_callbacks(app: Dash) -> None:
                     "result": _result_snapshot(dashboard_service.get_result(result_id)),
                 },
             )
-        return result_id or current_id or no_update
+        if result_id:
+            return result_id, {
+                "reason": "chart_result_selected",
+                "result_id": result_id,
+                "nonce": time.time_ns(),
+            }
+        return current_id or no_update, no_update
 
     # ── 3. Toggle feedback (thumbs up / down per result card) ─────────────────
     @app.callback(
@@ -421,6 +539,7 @@ def register_callbacks(app: Dash) -> None:
             r.faiss_row_id for rid in disliked_ids
             if (r := dashboard_service.get_result(rid)) and r.faiss_row_id is not None
         ]
+        modality_feedback = _modality_feedback_summary(liked_ids, disliked_ids)
 
         refined_embedding = _pl.rocchio_refine(embedding, liked_rows, disliked_rows)
         evaluation_logger.log_event(
@@ -431,6 +550,7 @@ def register_callbacks(app: Dash) -> None:
                 "disliked_result_ids": disliked_ids,
                 "liked_visual_vectors": len(liked_rows),
                 "disliked_visual_vectors": len(disliked_rows),
+                "modality_feedback": modality_feedback,
             },
         )
 
@@ -443,7 +563,11 @@ def register_callbacks(app: Dash) -> None:
             top_k=20,
         )
         refined_visual = _pl.retrieve_visual_from_embedding(refined_embedding, top_k=filters.top_k)
-        results = dashboard_service.refine_visual(filters, refined_visual)
+        results = dashboard_service.refine_visual(
+            filters,
+            refined_visual,
+            modality_feedback=modality_feedback,
+        )
 
         disliked_set = set(disliked_ids)
         results = [r for r in results if r.id not in disliked_set]
@@ -499,13 +623,14 @@ def register_callbacks(app: Dash) -> None:
     # ── 6b. Run transcript heatmap + extractive QA span on demand ─────────────
     @app.callback(
         Output("transcript-evidence", "data"),
+        Output("evidence-scroll-request", "data", allow_duplicate=True),
         Input("highlight-answer-button", "n_clicks"),
         State("selected-result-id", "data"),
         prevent_initial_call=True,
     )
     def run_transcript_evidence(n_clicks, selected_id):
         if not n_clicks or not selected_id:
-            return no_update
+            return no_update, no_update
         evaluation_logger.log_event(
             "transcript_highlight_requested",
             {
@@ -515,7 +640,7 @@ def register_callbacks(app: Dash) -> None:
         )
         enriched = dashboard_service.compute_transcript_evidence(selected_id)
         if enriched is None:
-            return no_update
+            return no_update, no_update
         enriched["_result_id"] = selected_id
         evaluation_logger.log_event(
             "transcript_highlight_completed",
@@ -525,7 +650,11 @@ def register_callbacks(app: Dash) -> None:
                 "answer_candidates": enriched.get("answer_candidates"),
             },
         )
-        return enriched
+        return enriched, {
+            "reason": "transcript_highlight_completed",
+            "result_id": selected_id,
+            "nonce": time.time_ns(),
+        }
 
     # ── 6c. Passive evaluation-only interaction observations ─────────────────
     @app.callback(
@@ -670,7 +799,20 @@ def register_callbacks(app: Dash) -> None:
                 selected.start_sec,
             )
 
-        stats = dashboard_service.get_stats()
+        if startup_manager.snapshot().get("ready"):
+            stats = dashboard_service.get_stats()
+        else:
+            # Do not let the initial page-render callback duplicate model/index
+            # loading while the background warmup is still in progress.
+            stats = DashboardStats(
+                total_videos=0,
+                total_keyframes=0,
+                transcript_chunks=0,
+                indexed_items=0,
+                avg_latency_ms=0,
+                retrieval_quality=0.0,
+                grounding_quality=0.0,
+            )
         summary = f"{len(results)} result{'s' if len(results) != 1 else ''}"
 
         return (
@@ -718,15 +860,45 @@ def _result_snapshot(result):
     }
 
 
-def build_keyword_suggestions(payload: dict[str, Any] | None):
+def _modality_feedback_summary(
+    liked_ids: list[str],
+    disliked_ids: list[str],
+) -> dict[str, int]:
+    summary = {
+        "liked_visual": 0,
+        "disliked_visual": 0,
+        "liked_transcript": 0,
+        "disliked_transcript": 0,
+    }
+    for direction, result_ids in (("liked", liked_ids), ("disliked", disliked_ids)):
+        for result_id in result_ids:
+            result = dashboard_service.get_result(result_id)
+            if result is None or result.modality not in {"visual", "transcript"}:
+                continue
+            summary[f"{direction}_{result.modality}"] += 1
+    return summary
+
+
+def build_keyword_suggestions(
+    payload: dict[str, Any] | None,
+    selected_keywords: dict[str, Any] | list[str] | None = None,
+    current_query: str = "",
+):
     terms = (payload or {}).get("suggested_terms") or []
     if not terms:
         return html.Div("No recommended keywords yet.", className="keyword-empty")
 
+    keyword_state = _normalise_keyword_state(selected_keywords, current_query)
+    selected = set(keyword_state["terms"])
+    base_query = keyword_state["base_query"]
     chips = []
     for index, item in enumerate(terms[:20], start=1):
         term = str(item.get("term", "")).strip()
         if not term:
+            continue
+        # Do not recommend words or phrases already written by the user. Keep
+        # currently selected chips visible so they can still be toggled off.
+        if term not in selected and _contains_phrase(base_query, term):
             continue
         source = str(item.get("source", payload.get("source", "")))
         confidence = item.get("confidence")
@@ -743,7 +915,12 @@ def build_keyword_suggestions(payload: dict[str, Any] | None):
                 term,
                 id={"type": "keyword-chip", "term": term},
                 n_clicks=0,
-                className="keyword-chip",
+                className=(
+                    "keyword-chip keyword-chip-selected"
+                    if term in selected
+                    else "keyword-chip"
+                ),
+                **{"aria-pressed": "true" if term in selected else "false"},
                 title=" · ".join(title_parts) or source,
             )
         )
@@ -758,3 +935,40 @@ def build_keyword_suggestions(payload: dict[str, Any] | None):
             html.Div(chips, className="keyword-chip-row"),
         ],
     )
+
+
+def _contains_phrase(query: str, phrase: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?<!\w){re.escape(phrase)}(?!\w)",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalise_keyword_state(
+    value: dict[str, Any] | list[str] | None,
+    current_query: str,
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        base_query = str(value.get("base_query", "")).strip()
+        terms = [
+            str(term).strip()
+            for term in value.get("terms", [])
+            if str(term).strip()
+        ]
+        return {
+            "base_query": base_query or (current_query or "").strip(),
+            "terms": terms,
+        }
+
+    # Compatibility with logs/pages created before the store became structured.
+    terms = [str(term).strip() for term in (value or []) if str(term).strip()]
+    return {"base_query": (current_query or "").strip(), "terms": terms}
+
+
+def _compose_keyword_query(base_query: str, selected_terms: list[str]) -> str:
+    """Append only chip-managed terms; never edit words inside the base query."""
+    pieces = [base_query.strip(), *(term.strip() for term in selected_terms)]
+    return " ".join(piece for piece in pieces if piece)

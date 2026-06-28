@@ -57,6 +57,7 @@ def retrieve_transcript_evidence(
     lexical_k: int = 100,
     rerank_k: int = 50,
     use_cross_encoder: bool = True,
+    cross_encoder_name: str = DEFAULT_CROSS_ENCODER,
     refine_timestamps: bool = False,
     align_across_povs: bool = False,
     align_playback: bool = False,
@@ -69,6 +70,7 @@ def retrieve_transcript_evidence(
         lexical_k=lexical_k,
         rerank_k=rerank_k,
         use_cross_encoder=use_cross_encoder,
+        cross_encoder_name=cross_encoder_name,
         refine_timestamps=refine_timestamps,
         align_across_povs=align_across_povs,
         align_playback=align_playback,
@@ -246,17 +248,36 @@ def rrf_fuse(
 
 def cross_encoder_rerank(question: str, candidates: list[dict[str, Any]], cross_encoder: Any) -> list[dict[str, Any]]:
     pairs = [(question, str(item.get("text", ""))) for item in candidates]
-    scores = cross_encoder.predict(pairs, show_progress_bar=False)
+    batch_size = max(1, int(os.environ.get("TRANSCRIPT_RERANK_BATCH_SIZE", "8")))
+    scores = cross_encoder.predict(
+        pairs,
+        batch_size=batch_size,
+        show_progress_bar=False,
+    )
+    normalize_scores = os.environ.get("TRANSCRIPT_RERANK_NORMALIZE", "1") != "0"
     ranked: list[dict[str, Any]] = []
     for item, score in zip(candidates, scores):
+        raw_score = float(score)
+        relevance = sigmoid_score(raw_score) if normalize_scores else raw_score
         updated = dict(item)
-        updated["cross_encoder_score"] = float(score)
-        updated["score"] = float(score)
+        updated["cross_encoder_raw_score"] = raw_score
+        updated["cross_encoder_score"] = relevance
+        updated["reranker_model"] = getattr(
+            cross_encoder,
+            "model_name_or_path",
+            os.environ.get("TRANSCRIPT_RERANKER_MODEL", DEFAULT_CROSS_ENCODER),
+        )
+        updated["score"] = relevance
         ranked.append(updated)
     ranked.sort(key=lambda item: float(item.get("cross_encoder_score", item.get("score", 0.0))), reverse=True)
     for rank, item in enumerate(ranked, start=1):
         item["rerank_rank"] = rank
     return ranked
+
+
+def sigmoid_score(value: float) -> float:
+    value = max(-60.0, min(60.0, float(value)))
+    return 1.0 / (1.0 + math.exp(-value))
 
 
 def minilm_passage_rerank(question: str, candidates: list[dict[str, Any]], model: Any) -> list[dict[str, Any]]:
@@ -1400,7 +1421,10 @@ def _load_cross_encoder(model_name: str):
         return None
 
     candidates = []
-    env_path = os.environ.get("TRANSCRIPT_CROSS_ENCODER_MODEL")
+    env_path = (
+        os.environ.get("TRANSCRIPT_RERANKER_MODEL")
+        or os.environ.get("TRANSCRIPT_CROSS_ENCODER_MODEL")
+    )
     if env_path:
         candidates.append(Path(env_path))
     explicit_path = Path(model_name)
@@ -1412,11 +1436,14 @@ def _load_cross_encoder(model_name: str):
         if not path.is_dir():
             continue
         try:
-            return CrossEncoder(
-                str(path),
-                model_kwargs={"local_files_only": True},
-                processor_kwargs={"local_files_only": True},
-            )
+            kwargs: dict[str, Any] = {
+                "model_kwargs": {"local_files_only": True},
+                "processor_kwargs": {"local_files_only": True},
+            }
+            configured_device = os.environ.get("TRANSCRIPT_RERANK_DEVICE")
+            if configured_device:
+                kwargs["device"] = configured_device
+            return CrossEncoder(str(path), **kwargs)
         except Exception:
             continue
     return None

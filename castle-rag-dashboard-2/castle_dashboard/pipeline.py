@@ -21,18 +21,92 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+# Compute nodes are offline. Prevent Hugging Face from spending minutes retrying
+# network requests before falling back to files that are already available.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 # ── paths ────────────────────────────────────────────────────────────────────
 
 _BASE = "/gpfs/scratch1/shared/group_h/data_goncalo"
+_SHARED_MODELS = Path("/gpfs/scratch1/shared/group_h/models")
+_DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _complete_model_dir(path: Path) -> bool:
+    """Return true only when a local model directory includes actual weights."""
+    if not path.is_dir():
+        return False
+    return any(
+        candidate.is_file()
+        for pattern in ("*.safetensors", "pytorch_model*.bin", "model*.bin")
+        for candidate in path.glob(pattern)
+    )
+
+
+def _complete_index_dir(path: Path) -> bool:
+    return (path / "transcript.faiss").is_file() and (path / "metadata.json").is_file()
+
+
+def _preferred_index(env_name: str, local_name: str, shared_path: str) -> str:
+    configured = os.getenv(env_name)
+    if configured:
+        return configured
+    local_path = _DASHBOARD_ROOT / "indexes" / local_name
+    return str(local_path if _complete_index_dir(local_path) else Path(shared_path))
+
+
+def _preferred_model(
+    env_name: str,
+    local_name: str,
+    shared_name: str,
+    *,
+    fallback_name: str | None = None,
+) -> str:
+    configured = os.getenv(env_name)
+    if configured:
+        return configured
+    local_path = _DASHBOARD_ROOT / "models" / local_name
+    if _complete_model_dir(local_path):
+        return str(local_path)
+    shared_path = _SHARED_MODELS / shared_name
+    if _complete_model_dir(shared_path):
+        return str(shared_path)
+    return fallback_name or str(shared_path)
 
 VISUAL_INDEX_DIR: str = os.getenv(
+    "VISUAL_INDEX_DIR"
+) or _preferred_index(
     "VISUAL_INDEX_DIR",
+    "siglip_index_day1",
     f"{_BASE}/artifacts/siglip_index_day1",
 )
 TRANSCRIPT_INDEX_DIR: str = os.getenv(
+    "TRANSCRIPT_INDEX_DIR"
+) or _preferred_index(
     "TRANSCRIPT_INDEX_DIR",
+    "transcript_index_day1",
     f"{_BASE}/artifacts/transcript_index_day1",
 )
+SIGLIP_TEXT_MODEL_DIR = _preferred_model(
+    "SIGLIP_TEXT_MODEL_NAME",
+    "siglip2-so400m-patch16-512-text",
+    "siglip2-so400m-patch16-512-text",
+)
+MINILM_MODEL_DIR = _preferred_model(
+    "MINILM_MODEL_DIR",
+    "all-MiniLM-L6-v2",
+    "all-MiniLM-L6-v2",
+    fallback_name="sentence-transformers/all-MiniLM-L6-v2",
+)
+QA_MODEL_DIR = _preferred_model(
+    "ANSWER_SPAN_QA_MODEL",
+    "distilbert-base-cased-distilled-squad",
+    "distilbert-base-cased-distilled-squad",
+)
+os.environ.setdefault("SIGLIP_TEXT_MODEL_NAME", SIGLIP_TEXT_MODEL_DIR)
+os.environ.setdefault("MINILM_MODEL_DIR", MINILM_MODEL_DIR)
+os.environ.setdefault("ANSWER_SPAN_QA_MODEL", QA_MODEL_DIR)
 DIVERSITY_WINDOW_SEC = float(os.getenv("VISUAL_DIVERSITY_WINDOW_SEC", "30"))
 CANDIDATE_MULTIPLIER = int(os.getenv("VISUAL_CANDIDATE_MULTIPLIER", "5"))
 
@@ -79,7 +153,7 @@ def _resolve_query_model_name(index_model_name: str) -> str:
     text-only SigLIP/SigLIP2 sibling model so query embedding doesn't have to
     load the (unused) vision tower."""
     env_text_model = os.environ.get("SIGLIP_TEXT_MODEL_NAME")
-    if env_text_model:
+    if env_text_model and _complete_model_dir(Path(env_text_model)):
         return env_text_model
     path = Path(index_model_name)
     if path.exists():
@@ -94,7 +168,7 @@ def _load_siglip_text_model() -> tuple[Any, Any, Any]:
     from src.clip_retrieval import load_clip_text_model  # type: ignore[import]
     _, _, model_name = _load_visual_index()
     query_model_name = _resolve_query_model_name(model_name)
-    return load_clip_text_model(query_model_name, local_files_only=False)
+    return load_clip_text_model(query_model_name, local_files_only=True)
 
 
 @lru_cache(maxsize=1)
@@ -102,7 +176,7 @@ def _load_siglip_full_model() -> tuple[Any, Any, Any]:
     """Full image+text SigLIP model — only needed for dino-siglip-rerank grounding."""
     from src.clip_retrieval import load_clip_model  # type: ignore[import]
     _, _, model_name = _load_visual_index()
-    return load_clip_model(model_name, local_files_only=False)
+    return load_clip_model(model_name, local_files_only=True)
 
 
 # ── public retrieval API ────────────────────────────────────────────────────
@@ -156,12 +230,24 @@ def retrieve_visual(question: str, top_k: int = 20, *, use_query_variants: bool 
 
 def retrieve_transcript(question: str, top_k: int = 20) -> list[dict[str, Any]]:
     """Transcript evidence retrieval — dense (MiniLM) + lexical (BM25) candidates,
-    fused with RRF, then reranked with a cross-encoder (or MiniLM fallback if the
-    cross-encoder model isn't cached locally)."""
+    fused with RRF, then reranked with MiniLM by default. A local cross-encoder
+    such as BGE can still be enabled explicitly through the environment."""
     from src.transcript_retrieval import retrieve_transcript_evidence  # type: ignore[import]
 
     t0 = time.perf_counter()
-    results = retrieve_transcript_evidence(question, TRANSCRIPT_INDEX_DIR, top_k=top_k, align_playback=True)
+    reranker_model = os.environ.get(
+        "TRANSCRIPT_RERANKER_MODEL",
+        "minilm",
+    )
+    rerank_k = max(top_k, int(os.environ.get("TRANSCRIPT_RERANK_K", "50")))
+    results = retrieve_transcript_evidence(
+        question,
+        TRANSCRIPT_INDEX_DIR,
+        top_k=top_k,
+        rerank_k=rerank_k,
+        cross_encoder_name=reranker_model,
+        align_playback=True,
+    )
     for item in results:
         _fix_item_paths(item)
     elapsed = time.perf_counter() - t0
@@ -173,12 +259,18 @@ def route(
     question: str,
     visual_results: list[dict[str, Any]],
     transcript_results: list[dict[str, Any]],
+    feedback: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Pick exactly one evidence mode (visual or transcript) for `question`,
     given each channel's top candidate. Returns the chosen item plus a
     `router_debug` dict with the heuristic/raw/combined scores and reason."""
     from src.evidence_router import route_evidence  # type: ignore[import]
-    return route_evidence(question, visual_results, transcript_results)
+    return route_evidence(
+        question,
+        visual_results,
+        transcript_results,
+        feedback=feedback,
+    )
 
 
 def get_mixed_evidence(
@@ -243,10 +335,28 @@ def recommend_keywords(
 
 
 @lru_cache(maxsize=1)
+def _load_transcript_index() -> tuple[Any, list[dict[str, Any]], str]:
+    """Load transcript FAISS data once for context, statistics and keywords."""
+    from src.retriever import load_index  # type: ignore[import]
+
+    index, metadata, model_name = load_index(TRANSCRIPT_INDEX_DIR)
+    for item in metadata:
+        _fix_item_paths(item)
+    return index, metadata, model_name
+
+
+@lru_cache(maxsize=1)
 def _load_minilm_model() -> Any:
-    """Load the same MiniLM model used by transcript dense retrieval, cached."""
-    from src.retriever import load_embedding_model, load_index  # type: ignore[import]
-    _, _, model_name = load_index(TRANSCRIPT_INDEX_DIR)
+    """Load the transcript/keyword MiniLM model once from local offline files."""
+    from src.retriever import load_embedding_model  # type: ignore[import]
+
+    _, _, indexed_model_name = _load_transcript_index()
+    configured = os.environ.get("MINILM_MODEL_DIR")
+    model_name = (
+        configured
+        if configured and _complete_model_dir(Path(configured))
+        else indexed_model_name
+    )
     return load_embedding_model(model_name)
 
 
@@ -400,16 +510,10 @@ def run_grounding(query: str, chunk: dict[str, Any]) -> dict[str, Any]:
     from src.visual_grounding import GroundingConfig, ground_visual_evidence  # type: ignore[import]
     config = GroundingConfig()
     result = ground_visual_evidence(query, chunk, config=config)
-    output_image_path = None
-    if result.output_image_path:
-        output_path = Path(result.output_image_path)
-        try:
-            output_image_path = str(output_path.relative_to(_BASE))
-        except ValueError:
-            try:
-                output_image_path = str(output_path.relative_to(Path(_BASE)))
-            except ValueError:
-                output_image_path = str(output_path)
+    # visual_grounding returns a path relative to the checked-in repository
+    # when possible (normally artifacts/visual_grounding/<file>). Preserve that
+    # route-relative path instead of incorrectly resolving it under _BASE.
+    output_image_path = str(result.output_image_path) if result.output_image_path else None
     return {
         "keyframe_path": result.keyframe_path,
         "output_image_path": output_image_path,
@@ -428,8 +532,7 @@ def get_transcript_context(
     window_sec: float = 120.0,
 ) -> list[dict[str, Any]]:
     """Return transcript chunks from the same source/hour within ±window_sec."""
-    from src.retriever import load_index  # type: ignore[import]
-    _, metadata, _ = load_index(TRANSCRIPT_INDEX_DIR)
+    _, metadata, _ = _load_transcript_index()
     chunks = [
         item for item in metadata
         if item.get("source_name") == source_name
@@ -547,9 +650,8 @@ def get_available_viewpoints() -> list[str]:
 
 
 def get_stats() -> dict[str, int]:
-    from src.retriever import load_index  # type: ignore[import]
     _, v_meta, _ = _load_visual_index()
-    _, t_meta, _ = load_index(TRANSCRIPT_INDEX_DIR)
+    _, t_meta, _ = _load_transcript_index()
     return {
         "total_keyframes": len(v_meta),
         "transcript_chunks": len(t_meta),

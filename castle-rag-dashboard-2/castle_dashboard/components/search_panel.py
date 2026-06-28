@@ -1,7 +1,5 @@
 from dash import dcc, html
 
-from castle_dashboard.services.dashboard_service import dashboard_service
-
 MODALITY_OPTIONS = [
     {"label": "Transcript (speech → text search)", "value": "transcript"},
     {"label": "Visual (SigLIP image similarity)", "value": "visual"},
@@ -9,9 +7,7 @@ MODALITY_OPTIONS = [
 
 
 def build_search_panel() -> html.Aside:
-    viewpoints = [{"label": "All viewpoints", "value": "All"}] + [
-        {"label": v, "value": v} for v in dashboard_service.get_available_viewpoints()
-    ]
+    viewpoints = [{"label": "All viewpoints", "value": "All"}]
     return html.Aside(
         className="sidebar",
         children=[
@@ -31,6 +27,32 @@ def build_search_panel() -> html.Aside:
                 className="panel compact-panel",
                 children=[
                     html.H2("Search"),
+                    html.Div(
+                        id="startup-status-panel",
+                        className="startup-status-panel",
+                        children=[
+                            html.Div(
+                                [
+                                    html.Span("Starting dashboard", id="startup-stage"),
+                                    html.Span("0%", id="startup-percent"),
+                                ],
+                                className="startup-status-heading",
+                            ),
+                            html.Div(
+                                html.Div(
+                                    id="startup-progress-fill",
+                                    className="startup-progress-fill",
+                                    style={"width": "0%"},
+                                ),
+                                className="startup-progress-track",
+                            ),
+                            html.Div(
+                                "Waiting for model warmup…",
+                                id="startup-detail",
+                                className="startup-detail",
+                            ),
+                        ],
+                    ),
                     html.Label("Natural-language query", htmlFor="query-input"),
                     dcc.Textarea(
                         id="query-input",
@@ -68,6 +90,7 @@ def build_search_panel() -> html.Aside:
                         id="search-button",
                         n_clicks=0,
                         className="primary-button",
+                        disabled=True,
                     ),
                     dcc.Loading(
                         type="dot",

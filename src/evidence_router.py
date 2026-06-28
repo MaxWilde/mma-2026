@@ -46,18 +46,34 @@ TRANSCRIPT_CUES = {
 }
 
 
-def route_evidence(question: str, visual_results: list[dict[str, Any]], transcript_results: list[dict[str, Any]]) -> dict[str, Any]:
+def route_evidence(
+    question: str,
+    visual_results: list[dict[str, Any]],
+    transcript_results: list[dict[str, Any]],
+    feedback: dict[str, int] | None = None,
+) -> dict[str, Any]:
     visual = visual_results[0] if visual_results else None
     transcript = transcript_results[0] if transcript_results else None
-    visual_score = route_score(question, visual, "visual")
-    transcript_score = route_score(question, transcript, "transcript")
+    base_visual_score = route_score(question, visual, "visual")
+    base_transcript_score = route_score(question, transcript, "transcript")
+    feedback_preference = modality_feedback_preference(feedback)
+    feedback_strength = max(
+        0.0,
+        float((feedback or {}).get("strength", 0.75)),
+    )
+    visual_score = base_visual_score + feedback_strength * feedback_preference
+    transcript_score = base_transcript_score - feedback_strength * feedback_preference
     raw_visual_score = safe_score(visual)
     raw_transcript_score = safe_score(transcript)
     visual_heuristic = heuristic_score(question, "visual")
     transcript_heuristic = heuristic_score(question, "transcript")
     transcript_raw_margin = raw_transcript_score - raw_visual_score
 
-    if visual_heuristic == 0.0 and transcript_raw_margin >= 0.25:
+    if (
+        feedback_preference <= 0.0
+        and visual_heuristic == 0.0
+        and transcript_raw_margin >= 0.25
+    ):
         chosen = dict(transcript or {})
         chosen["evidence_type"] = "transcript"
         reason = (
@@ -79,6 +95,11 @@ def route_evidence(question: str, visual_results: list[dict[str, Any]], transcri
         chosen["evidence_type"] = "visual"
         reason = "visual selected because combined visual score met or exceeded transcript score"
 
+    if feedback_preference > 0:
+        reason += "; analyst feedback favored visual evidence"
+    elif feedback_preference < 0:
+        reason += "; analyst feedback favored transcript evidence"
+
     router_margin = abs(visual_score - transcript_score)
     router_confidence = bounded_margin_confidence(router_margin)
     router_second_choice = "transcript" if chosen["evidence_type"] == "visual" else "visual"
@@ -97,6 +118,11 @@ def route_evidence(question: str, visual_results: list[dict[str, Any]], transcri
         "raw_transcript_minus_visual": transcript_raw_margin,
         "combined_visual_score": visual_score,
         "combined_transcript_score": transcript_score,
+        "base_combined_visual_score": base_visual_score,
+        "base_combined_transcript_score": base_transcript_score,
+        "feedback_preference": feedback_preference,
+        "feedback_strength": feedback_strength,
+        "feedback": dict(feedback or {}),
         "router_margin": router_margin,
         "router_confidence": router_confidence,
         "router_confidence_percent": router_confidence * 100.0,
@@ -106,6 +132,26 @@ def route_evidence(question: str, visual_results: list[dict[str, Any]], transcri
         "reason": reason,
     }
     return chosen
+
+
+def modality_feedback_preference(feedback: dict[str, int] | None) -> float:
+    """Return a bounded preference in [-1, 1] from analyst feedback."""
+    if not feedback:
+        return 0.0
+    liked_visual = max(0, int(feedback.get("liked_visual", 0)))
+    disliked_visual = max(0, int(feedback.get("disliked_visual", 0)))
+    liked_transcript = max(0, int(feedback.get("liked_transcript", 0)))
+    disliked_transcript = max(0, int(feedback.get("disliked_transcript", 0)))
+    total = liked_visual + disliked_visual + liked_transcript + disliked_transcript
+    if total <= 0:
+        return 0.0
+    signal = (
+        liked_visual
+        + disliked_transcript
+        - liked_transcript
+        - disliked_visual
+    )
+    return max(-1.0, min(1.0, signal / total))
 
 
 def route_score(question: str, result: dict[str, Any] | None, mode: str) -> float:

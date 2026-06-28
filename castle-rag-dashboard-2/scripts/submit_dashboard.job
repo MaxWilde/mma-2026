@@ -6,8 +6,88 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=0:30:00
+#SBATCH --time=01:00:00
 
-cd /gpfs/home6/scur0260/multimedia-rag
-export PYTHONPATH="$PWD:$PWD/castle-rag-dashboard-2"
-/gpfs/scratch1/shared/group_h/data_goncalo/.venv/bin/python3 castle-rag-dashboard-2/app.py
+set -eu
+
+REPO_ROOT="/home/scur0260/mma-2026"
+VENV_SHARED="/gpfs/scratch1/shared/group_h/data_goncalo/.venv"
+VENV_HOME="${HOME}/.castle-venv"
+
+cd "${REPO_ROOT}"
+
+# Prefer a home-local package copy when available, but do not require it.
+# This keeps the job usable before the optional speed-up copy is created.
+PYTHON="${VENV_SHARED}/bin/python3"
+PY_VER=$("${PYTHON}" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+HOME_SITE="${VENV_HOME}/lib/python${PY_VER}/site-packages"
+SHARED_SITE="${VENV_SHARED}/lib/python${PY_VER}/site-packages"
+
+if [ -d "${HOME_SITE}" ]; then
+    export PYTHONPATH="${HOME_SITE}:${REPO_ROOT}:${REPO_ROOT}/castle-rag-dashboard-2${PYTHONPATH:+:${PYTHONPATH}}"
+    ACTIVE_SITE="${HOME_SITE}"
+    USE_HOME_CACHE=1
+    echo "[setup] using home-local Python packages from ${HOME_SITE}"
+else
+    export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/castle-rag-dashboard-2${PYTHONPATH:+:${PYTHONPATH}}"
+    ACTIVE_SITE="${SHARED_SITE}"
+    USE_HOME_CACHE=0
+    echo "[setup] home package copy not found; using shared virtual environment"
+fi
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# Explicit resource paths remain portable to this account. The Python pipeline
+# will prefer complete home-local copies if they are created later.
+export VISUAL_INDEX_DIR="${VISUAL_INDEX_DIR:-/gpfs/scratch1/shared/group_h/data_goncalo/artifacts/siglip_index_day1}"
+export TRANSCRIPT_INDEX_DIR="${TRANSCRIPT_INDEX_DIR:-/gpfs/scratch1/shared/group_h/data_goncalo/artifacts/transcript_index_day1}"
+LOCAL_MODEL_ROOT="${REPO_ROOT}/castle-rag-dashboard-2/models"
+if [ -f "${LOCAL_MODEL_ROOT}/siglip2-so400m-patch16-512-text/model.safetensors" ]; then
+    DEFAULT_SIGLIP="${LOCAL_MODEL_ROOT}/siglip2-so400m-patch16-512-text"
+else
+    DEFAULT_SIGLIP="/gpfs/scratch1/shared/group_h/models/siglip2-so400m-patch16-512-text"
+fi
+if [ -f "${LOCAL_MODEL_ROOT}/distilbert-base-cased-distilled-squad/model.safetensors" ]; then
+    DEFAULT_QA="${LOCAL_MODEL_ROOT}/distilbert-base-cased-distilled-squad"
+else
+    DEFAULT_QA="/gpfs/scratch1/shared/group_h/models/distilbert-base-cased-distilled-squad"
+fi
+export SIGLIP_TEXT_MODEL_NAME="${SIGLIP_TEXT_MODEL_NAME:-${DEFAULT_SIGLIP}}"
+export ANSWER_SPAN_QA_MODEL="${ANSWER_SPAN_QA_MODEL:-${DEFAULT_QA}}"
+# Stable study default: teammate-compatible MiniLM passage reranking over 50
+# fused candidates. BGE remains available as an explicit experimental flag.
+if [ "${CASTLE_USE_BGE_RERANKER:-0}" = "1" ]; then
+    export TRANSCRIPT_RERANKER_MODEL="/gpfs/scratch1/shared/group_h/models/bge-reranker-v2-m3"
+    export TRANSCRIPT_RERANK_K="${TRANSCRIPT_RERANK_K:-20}"
+    echo "[setup] transcript reranker: BGE (${TRANSCRIPT_RERANK_K} candidates)"
+else
+    export TRANSCRIPT_RERANKER_MODEL="minilm"
+    export TRANSCRIPT_RERANK_K="50"
+    unset TRANSCRIPT_RERANK_DEVICE
+    echo "[setup] transcript reranker: MiniLM (${TRANSCRIPT_RERANK_K} candidates)"
+fi
+
+# Prewarming shared GPFS can itself take many minutes. It is useful only when
+# the frequently-read packages/models have first been copied into home storage.
+if [ "${USE_HOME_CACHE}" = "1" ]; then
+    echo "[setup] warming home-local package and model page cache"
+    START_TS=$(date +%s)
+    {
+        for pkg in torch transformers tokenizers safetensors huggingface_hub \
+            sentence_transformers scipy sklearn numpy PIL faiss; do
+            [ -e "${ACTIVE_SITE}/${pkg}" ] && find "${ACTIVE_SITE}/${pkg}" -type f -print0
+        done
+        for path in \
+            "${SIGLIP_TEXT_MODEL_NAME}" \
+            "${ANSWER_SPAN_QA_MODEL}"; do
+            [ -d "${path}" ] && find "${path}" -type f -print0
+        done
+    } 2>/dev/null | xargs -0 -r -P 16 cat >/dev/null 2>&1
+    echo "[setup] page-cache warmup completed in $(($(date +%s)-START_TS))s"
+else
+    echo "[setup] skipping shared-GPFS prewarm; run scripts/setup_fast_dashboard_home.sh once for the fast path"
+fi
+
+echo "[setup] starting dashboard on $(hostname)"
+exec "${PYTHON}" castle-rag-dashboard-2/app.py
